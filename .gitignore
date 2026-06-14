@@ -1,0 +1,11 @@
+# Environment
+.env
+.env.*
+
+# Build & debug
+*.log
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
