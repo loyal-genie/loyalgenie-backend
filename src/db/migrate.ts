@@ -47,6 +47,30 @@ CREATE TABLE IF NOT EXISTS branches (
 
 CREATE INDEX IF NOT EXISTS idx_businesses_qr_slug ON businesses(qr_slug);
 CREATE INDEX IF NOT EXISTS idx_users_email ON business_users(email);
+
+CREATE TABLE IF NOT EXISTS customer_users (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_customer_users_email ON customer_users(email);
+CREATE INDEX IF NOT EXISTS idx_customer_users_phone ON customer_users(phone);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  user_type TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_token_hash ON password_reset_tokens(token_hash);
 `
 
 const COLUMN_PATCHES = [

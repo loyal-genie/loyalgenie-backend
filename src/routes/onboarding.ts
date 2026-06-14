@@ -12,7 +12,7 @@ const router = Router()
 function getUserFromRequest(req: { headers: { authorization?: string } }) {
   const header = req.headers.authorization
   if (!header?.startsWith('Bearer ')) return null
-  return verifyToken(header.slice(7))
+  return verifyToken(header.slice(7), 'business')
 }
 
 router.post('/complete', async (req, res) => {
@@ -35,7 +35,7 @@ router.post('/complete', async (req, res) => {
 
     const user = await getUserByEmail(parsed.data.email)
     const token = user
-      ? signToken({ id: user.id as string, email: user.email as string })
+      ? signToken({ id: user.id as string, email: user.email as string, role: 'business' })
       : undefined
 
     res.status(201).json({
