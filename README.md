@@ -14,7 +14,8 @@ npm run dev            # http://localhost:4000
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start API with hot reload |
+| `npm run dev` | Start API with hot reload (local); runs compiled `dist/` on Render |
+| `npm start` | Start compiled API (production) |
 | `npm run db:migrate` | Apply database migrations |
 | `npm run build` | Compile TypeScript |
 
