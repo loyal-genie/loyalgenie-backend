@@ -10,12 +10,27 @@ dotenv.config()
 const app = express()
 const PORT = Number(process.env.PORT ?? 4000)
 
+function normalizeOrigin(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '')
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+  try {
+    return new URL(withProtocol).origin
+  } catch {
+    return trimmed
+  }
+}
+
 function buildAllowedOrigins(): string[] {
   const fromEnv = (process.env.FRONTEND_URL ?? 'http://localhost:5173')
     .split(',')
-    .map(s => s.trim())
+    .map(normalizeOrigin)
     .filter(Boolean)
-  return [...new Set([...fromEnv, 'http://localhost:5173', 'http://localhost:3000', 'http://localhost:3001'])]
+  return [...new Set([
+    ...fromEnv,
+    normalizeOrigin('http://localhost:5173'),
+    normalizeOrigin('http://localhost:3000'),
+    normalizeOrigin('http://localhost:3001'),
+  ])]
 }
 
 function isVercelPreviewOrigin(origin: string, allowed: string): boolean {
@@ -31,12 +46,25 @@ function isVercelPreviewOrigin(origin: string, allowed: string): boolean {
   }
 }
 
+function isVercelAppOrigin(origin: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(origin)
+    return protocol === 'https:' && hostname.endsWith('.vercel.app')
+  } catch {
+    return false
+  }
+}
+
 function isOriginAllowed(origin: string, allowedOrigins: string[]): boolean {
-  if (allowedOrigins.includes(origin)) return true
-  if (process.env.NODE_ENV !== 'production' && /^http:\/\/localhost:\d+$/.test(origin)) {
+  const normalized = normalizeOrigin(origin)
+  if (allowedOrigins.includes(normalized)) return true
+  if (process.env.NODE_ENV !== 'production' && /^http:\/\/localhost:\d+$/.test(normalized)) {
     return true
   }
-  return allowedOrigins.some(allowed => isVercelPreviewOrigin(origin, allowed))
+  if (allowedOrigins.some(allowed => isVercelPreviewOrigin(normalized, allowed))) return true
+  // Frontend is hosted on Vercel — allow production + preview URLs
+  if (isVercelAppOrigin(normalized)) return true
+  return false
 }
 
 const allowedOrigins = buildAllowedOrigins()
@@ -45,7 +73,8 @@ app.use(cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true)
     if (isOriginAllowed(origin, allowedOrigins)) return callback(null, true)
-    callback(new Error(`CORS blocked for origin: ${origin}`))
+    console.warn(`CORS blocked origin: ${origin} (allowed: ${allowedOrigins.join(', ')})`)
+    callback(null, false)
   },
   credentials: true,
 }))
