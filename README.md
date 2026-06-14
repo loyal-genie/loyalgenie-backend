@@ -31,6 +31,25 @@ npm run dev            # http://localhost:4000
 
 - **Business onboarding** — `POST /api/onboarding/complete` — see [docs/features/business-onboarding.md](../docs/features/business-onboarding.md)
 
+## Git
+
+This folder **is its own git repo**. Always `cd` here before any git command — the parent `loyal-genie/` folder has no `.git`.
+
+```bash
+cd backend
+git status                    # expect: ## main...origin/main
+git pull origin main
+git add .
+git commit -m "your message"
+git push origin main
+```
+
+| What | Value |
+|------|-------|
+| Branch | `main` → tracks `origin/main` |
+| Remote | `git@github.com-personal:loyal-genie/loyalgenie-backend.git` |
+| Deploy | Render pulls from this repo |
+
 ## API
 
 ```
