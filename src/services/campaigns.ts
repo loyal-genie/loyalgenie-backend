@@ -34,6 +34,7 @@ export const updateCampaignSchema = z.object({
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   userCap: z.number().int().min(1).optional(),
   playsPerDay: z.number().int().min(1).max(10).optional(),
+  perDayUserLimit: z.number().int().min(1).optional(),
   winRatePercent: z.number().int().min(5).max(100).optional(),
   status: z.enum(['active', 'paused', 'ended']).optional(),
 })
@@ -245,6 +246,10 @@ export async function updateCampaign(
     fields.push('plays_per_day = ?')
     args.push(payload.playsPerDay)
   }
+  if (payload.perDayUserLimit !== undefined) {
+    fields.push('per_day_user_limit = ?')
+    args.push(payload.perDayUserLimit)
+  }
   if (payload.winRatePercent !== undefined) {
     fields.push('win_rate_percent = ?')
     args.push(payload.winRatePercent)
@@ -449,16 +454,19 @@ export async function getPlayState(campaignId: string, customerId: string) {
   return {
     campaignId,
     playsRemaining: eligibility.playsRemaining,
+    playsUsedToday: eligibility.playsUsedToday,
+    playsPerDay: eligibility.playsPerDay,
     canPlay: eligibility.canPlay,
     message: eligibility.message,
     winRatePercent: campaign.winRatePercent,
-    playsPerDay: campaign.playsPerDay,
   }
 }
 
 interface EligibilityResult {
   canPlay: boolean
   playsRemaining: number
+  playsUsedToday: number
+  playsPerDay: number
   message: string
   isNewParticipant: boolean
 }
@@ -468,12 +476,12 @@ export async function checkEligibility(
   customerId: string,
 ): Promise<EligibilityResult> {
   if (campaign.status !== 'active') {
-    return { canPlay: false, playsRemaining: 0, message: 'Campaign is not active', isNewParticipant: false }
+    return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign is not active', isNewParticipant: false }
   }
 
   const today = todayDateStr()
   if (today < campaign.startDate || today > campaign.endDate) {
-    return { canPlay: false, playsRemaining: 0, message: 'Campaign is not running today', isNewParticipant: false }
+    return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign is not running today', isNewParticipant: false }
   }
 
   const partResult = await db.execute({
@@ -489,7 +497,7 @@ export async function checkEligibility(
       args: [campaign.id],
     })
     if (Number(totalUsers.rows[0]?.c ?? 0) >= campaign.userCap) {
-      return { canPlay: false, playsRemaining: 0, message: 'Campaign user cap reached', isNewParticipant: true }
+      return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign user cap reached', isNewParticipant: true }
     }
 
     const dailyNew = await db.execute({
@@ -498,7 +506,7 @@ export async function checkEligibility(
       args: [campaign.id],
     })
     if (Number(dailyNew.rows[0]?.c ?? 0) >= campaign.perDayUserLimit) {
-      return { canPlay: false, playsRemaining: 0, message: 'Daily participant limit reached. Try again tomorrow.', isNewParticipant: true }
+      return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Daily participant limit reached. Try again tomorrow.', isNewParticipant: true }
     }
   }
 
@@ -509,10 +517,14 @@ export async function checkEligibility(
   }
 
   const playsRemaining = Math.max(0, campaign.playsPerDay - playsToday)
+  const playsUsedToday = playsToday
+
   if (playsRemaining <= 0) {
     return {
       canPlay: false,
       playsRemaining: 0,
+      playsUsedToday,
+      playsPerDay: campaign.playsPerDay,
       message: 'No plays remaining today. Come back tomorrow!',
       isNewParticipant,
     }
@@ -521,6 +533,8 @@ export async function checkEligibility(
   return {
     canPlay: true,
     playsRemaining,
+    playsUsedToday,
+    playsPerDay: campaign.playsPerDay,
     message: 'Ready to play',
     isNewParticipant,
   }
@@ -622,6 +636,7 @@ export async function executeShakePlay(
   await db.batch(statements)
 
   const playsRemaining = eligibility.playsRemaining - 1
+  const playsUsedToday = eligibility.playsUsedToday + 1
 
   return {
     won,
@@ -633,6 +648,8 @@ export async function executeShakePlay(
     } : null,
     code: redemptionCode,
     playsRemaining,
+    playsUsedToday,
+    playsPerDay: campaign.playsPerDay,
     playId,
   }
 }
