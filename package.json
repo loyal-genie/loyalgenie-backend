@@ -8,7 +8,8 @@
     "start": "node dist/index.js",
     "build": "tsc",
     "db:migrate": "tsx src/db/migrate.ts",
-    "test:shake": "tsx scripts/test-shake-win.ts"
+    "test:shake": "tsx scripts/test-shake-win.ts",
+    "test:shake:e2e": "tsx scripts/test-shake-e2e-10-users.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",

@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { db } from '../db/client.js'
 import { getBusinessForUser } from './auth.js'
 import { rollWinWithDailyQuota } from './daily-win-quota.js'
+import { todayInCampaignTz, istDateSql } from '../utils/campaign-dates.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 export const PIN_CYCLE_SECONDS = 120
@@ -24,7 +25,7 @@ export const createCampaignSchema = z.object({
   userCap: z.number().int().min(1),
   perDayUserLimit: z.number().int().min(1),
   playsPerDay: z.number().int().min(1).max(10),
-  winRatePercent: z.number().int().min(5).max(100),
+  winRatePercent: z.number().int().min(1).max(100),
   rewards: z.array(rewardSchema).min(1),
 })
 
@@ -40,7 +41,7 @@ export const updateCampaignSchema = z.object({
   userCap: z.number().int().min(1).optional(),
   playsPerDay: z.number().int().min(1).max(10).optional(),
   perDayUserLimit: z.number().int().min(1).optional(),
-  winRatePercent: z.number().int().min(5).max(100).optional(),
+  winRatePercent: z.number().int().min(1).max(100).optional(),
   status: z.enum(['active', 'paused', 'ended']).optional(),
   rewards: z.array(updateRewardSchema).min(1).optional(),
 })
@@ -85,8 +86,35 @@ function pinExpiresAtIso(): string {
   return new Date(Date.now() + PIN_CYCLE_SECONDS * 1000).toISOString()
 }
 
-function todayDateStr(): string {
-  return new Date().toISOString().slice(0, 10)
+async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
+  const today = todayInCampaignTz()
+  if (businessId) {
+    await db.execute({
+      sql: `UPDATE campaigns SET status = 'ended'
+            WHERE business_id = ? AND status IN ('active', 'paused') AND end_date < ?`,
+      args: [businessId, today],
+    })
+    return
+  }
+  await db.execute({
+    sql: `UPDATE campaigns SET status = 'ended'
+          WHERE status IN ('active', 'paused') AND end_date < ?`,
+    args: [today],
+  })
+}
+
+async function ensureCampaignNotPastEnd(row: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const status = row.status as string
+  const endDate = row.end_date as string
+  const today = todayInCampaignTz()
+  if ((status === 'active' || status === 'paused') && today > endDate) {
+    await db.execute({
+      sql: `UPDATE campaigns SET status = 'ended' WHERE id = ?`,
+      args: [row.id as string],
+    })
+    return { ...row, status: 'ended' }
+  }
+  return row
 }
 
 async function getBusinessIdForUser(userId: string): Promise<string> {
@@ -203,6 +231,7 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
 
 export async function listCampaignsForBusiness(userId: string) {
   const businessId = await getBusinessIdForUser(userId)
+  await autoEndExpiredCampaigns(businessId)
   const result = await db.execute({
     sql: 'SELECT * FROM campaigns WHERE business_id = ? ORDER BY created_at DESC',
     args: [businessId],
@@ -319,7 +348,7 @@ export async function getCampaignForBusiness(userId: string, campaignId: string)
   })
   const row = result.rows[0]
   if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
-  return await rowToCampaign(row as Record<string, unknown>)
+  return await rowToCampaign(await ensureCampaignNotPastEnd(row as Record<string, unknown>))
 }
 
 export async function getCampaignPinForBusiness(userId: string, campaignId: string) {
@@ -344,21 +373,22 @@ export async function rotatePinIfExpired(campaignId: string) {
   const row = result.rows[0]
   if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
 
-  const expiresAt = row.pin_expires_at as string | null
+  const current = await ensureCampaignNotPastEnd(row as Record<string, unknown>)
+  const expiresAt = current.pin_expires_at as string | null
   const needsRotation = !expiresAt || new Date(expiresAt).getTime() <= Date.now()
 
-  if (needsRotation && row.status === 'active') {
+  if (needsRotation && current.status === 'active') {
     const pin = generatePin()
     const pinExpires = pinExpiresAtIso()
     await db.execute({
       sql: 'UPDATE campaigns SET pin = ?, pin_expires_at = ? WHERE id = ?',
       args: [pin, pinExpires, campaignId],
     })
-    row.pin = pin
-    row.pin_expires_at = pinExpires
+    current.pin = pin
+    current.pin_expires_at = pinExpires
   }
 
-  return await rowToCampaign(row as Record<string, unknown>)
+  return await rowToCampaign(current)
 }
 
 export async function getCampaignById(campaignId: string) {
@@ -368,19 +398,21 @@ export async function getCampaignById(campaignId: string) {
   })
   const row = result.rows[0]
   if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
-  return await rowToCampaign(row as Record<string, unknown>)
+  return await rowToCampaign(await ensureCampaignNotPastEnd(row as Record<string, unknown>))
 }
 
 export async function listBusinessesWithActiveCampaigns() {
+  await autoEndExpiredCampaigns()
+  const today = todayInCampaignTz()
   const result = await db.execute({
     sql: `SELECT DISTINCT b.id, b.name, b.tagline, b.business_type, b.city, b.brand_color
           FROM businesses b
           INNER JOIN campaigns c ON c.business_id = b.id
           WHERE c.status = 'active'
-            AND date(c.start_date) <= date('now')
-            AND date(c.end_date) >= date('now')
+            AND c.start_date <= ?
+            AND c.end_date >= ?
           ORDER BY b.name ASC`,
-    args: [],
+    args: [today, today],
   })
 
   const businesses = await Promise.all(
@@ -390,10 +422,10 @@ export async function listBusinessesWithActiveCampaigns() {
         sql: `SELECT id, name, mechanic, start_date, end_date, win_rate_percent, plays_per_day
               FROM campaigns
               WHERE business_id = ? AND status = 'active'
-                AND date(start_date) <= date('now')
-                AND date(end_date) >= date('now')
+                AND start_date <= ?
+                AND end_date >= ?
               ORDER BY created_at DESC`,
-        args: [businessId],
+        args: [businessId, today, today],
       })
       return {
         id: businessId,
@@ -421,7 +453,7 @@ export async function listBusinessesWithActiveCampaigns() {
 export async function getPublicCampaign(campaignId: string) {
   const campaign = await getCampaignById(campaignId)
   if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
-  const today = todayDateStr()
+  const today = todayInCampaignTz()
   if (today < campaign.startDate || today > campaign.endDate) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
@@ -469,21 +501,41 @@ export function verifyPlaySession(token: string, campaignId: string, customerId:
 }
 
 export async function verifyCampaignPin(campaignId: string, pin: string, customerId: string) {
-  const campaign = await rotatePinIfExpired(campaignId)
+  const campaign = await getCampaignById(campaignId)
   if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
 
-  const today = todayDateStr()
+  const today = todayInCampaignTz()
   if (today < campaign.startDate || today > campaign.endDate) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
 
-  // Active hours enforcement deferred — see docs/features/shake-and-win.md
-
-  if (!campaign.pin || campaign.pin !== pin) {
+  const normalizedPin = pin.trim()
+  if (!/^\d{3}$/.test(normalizedPin)) {
     throw new Error('INVALID_PIN')
   }
 
+  // Compare against stored PIN *before* rotating — avoids rejecting the code staff is still showing.
+  const storedPin = campaign.pin ? String(campaign.pin) : null
+  if (!storedPin || storedPin !== normalizedPin) {
+    throw new Error('INVALID_PIN')
+  }
+
+  const PIN_VERIFY_GRACE_SECONDS = 45
+  if (campaign.pinExpiresAt) {
+    const expiredAtMs = new Date(campaign.pinExpiresAt).getTime()
+    if (Date.now() > expiredAtMs + PIN_VERIFY_GRACE_SECONDS * 1000) {
+      await rotatePinIfExpired(campaignId)
+      throw new Error('INVALID_PIN')
+    }
+  }
+
   const playSessionToken = signPlaySession(campaignId, customerId)
+
+  // Refresh PIN after successful verify when the cycle has elapsed
+  if (campaign.pinExpiresAt && new Date(campaign.pinExpiresAt).getTime() <= Date.now()) {
+    await rotatePinIfExpired(campaignId)
+  }
+
   return { valid: true, playSessionToken, expiresIn: 300 }
 }
 
@@ -518,7 +570,7 @@ export async function checkEligibility(
     return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign is not active', isNewParticipant: false }
   }
 
-  const today = todayDateStr()
+  const today = todayInCampaignTz()
   if (today < campaign.startDate || today > campaign.endDate) {
     return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign is not running today', isNewParticipant: false }
   }
@@ -541,8 +593,8 @@ export async function checkEligibility(
 
     const dailyNew = await db.execute({
       sql: `SELECT COUNT(*) as c FROM campaign_participations
-            WHERE campaign_id = ? AND date(first_played_at) = date('now')`,
-      args: [campaign.id],
+            WHERE campaign_id = ? AND ${istDateSql('first_played_at')} = ?`,
+      args: [campaign.id, today],
     })
     if (Number(dailyNew.rows[0]?.c ?? 0) >= campaign.perDayUserLimit) {
       return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Daily participant limit reached. Try again tomorrow.', isNewParticipant: true }
@@ -584,15 +636,17 @@ export function rollWin(winRatePercent: number): boolean {
 }
 
 async function fetchDailyWinContext(campaignId: string, customerId: string) {
+  const today = todayInCampaignTz()
+  const playedAtIst = istDateSql('played_at')
   const result = await db.execute({
     sql: `SELECT
       (SELECT COUNT(DISTINCT customer_id) FROM game_plays
-       WHERE campaign_id = ? AND date(played_at) = date('now')) AS unique_players,
+       WHERE campaign_id = ? AND ${playedAtIst} = ?) AS unique_players,
       (SELECT COUNT(*) FROM game_plays
-       WHERE campaign_id = ? AND date(played_at) = date('now') AND won = 1) AS wins_today,
+       WHERE campaign_id = ? AND ${playedAtIst} = ? AND won = 1) AS wins_today,
       (SELECT COUNT(*) FROM game_plays
-       WHERE campaign_id = ? AND customer_id = ? AND date(played_at) = date('now')) AS customer_plays_today`,
-    args: [campaignId, campaignId, campaignId, customerId],
+       WHERE campaign_id = ? AND customer_id = ? AND ${playedAtIst} = ?) AS customer_plays_today`,
+    args: [campaignId, today, campaignId, today, campaignId, customerId, today],
   })
   const row = result.rows[0]!
   return {
@@ -645,7 +699,7 @@ export async function executeShakePlay(
     perDayUserLimit: campaign.perDayUserLimit,
   })
   const playId = nanoid()
-  const today = todayDateStr()
+  const today = todayInCampaignTz()
 
   let reward: CampaignReward | null = null
   let redemptionCode: string | null = null

@@ -13,6 +13,7 @@ import {
   simulateDay,
   targetWinsForPlayers,
 } from '../src/services/daily-win-quota.js'
+import { db } from '../src/db/client.js'
 
 const BASE = (process.env.API_BASE_URL ?? 'http://localhost:4000/api').replace(/\/$/, '')
 const RUN_ID = Date.now().toString(36)
@@ -349,8 +350,57 @@ async function runApiTests() {
   const badPin = await verifyPin(customer0.token, campaignId, '000')
   assert(
     'Wrong PIN rejected',
-    badPin.status === 401,
+    badPin.status === 422,
     `status ${badPin.status} — ${(badPin.json as { error?: string }).error}`,
+  )
+
+  // ── Auth required for verify-pin ──
+  const noAuthVerify = await api<{ error?: string }>(
+    'POST',
+    `/campaigns/${campaignId}/verify-pin`,
+    { pin: initialPin },
+  )
+  assert(
+    'verify-pin without auth rejected',
+    noAuthVerify.status === 401 && noAuthVerify.json.error === 'Authentication required',
+    `status ${noAuthVerify.status} — ${noAuthVerify.json.error}`,
+  )
+
+  // ── Auth session endpoint ──
+  const sessionCheck = await api<{ success?: boolean; data?: { role: string } }>(
+    'GET',
+    '/auth/session',
+    undefined,
+    customer0.token,
+  )
+  assert(
+    'Auth session returns customer role',
+    sessionCheck.status === 200 && sessionCheck.json.data?.role === 'customer',
+    `status ${sessionCheck.status} role=${sessionCheck.json.data?.role}`,
+  )
+
+  // ── Correct live PIN ──
+  const livePin = await getCampaignPin(vendorToken, campaignId)
+  assert('Vendor PIN available', Boolean(livePin), `pin=${livePin}`)
+  const goodPin = await verifyPin(customer0.token, campaignId, livePin!)
+  assert(
+    'Correct PIN accepted',
+    goodPin.status === 200 && Boolean(goodPin.json.data?.playSessionToken),
+    `status ${goodPin.status} — ${(goodPin.json as { error?: string }).error ?? 'ok'}`,
+  )
+
+  // ── Expired PIN within grace window ──
+  const customerGrace = await signupCustomer(900)
+  const gracePin = await getCampaignPin(vendorToken, campaignId)
+  await db.execute({
+    sql: 'UPDATE campaigns SET pin_expires_at = ? WHERE id = ?',
+    args: [new Date(Date.now() - 30_000).toISOString(), campaignId],
+  })
+  const graceVerify = await verifyPin(customerGrace.token, campaignId, gracePin!)
+  assert(
+    'Recently expired PIN still accepted (grace window)',
+    graceVerify.status === 200,
+    `status ${graceVerify.status} — ${(graceVerify.json as { error?: string }).error}`,
   )
 
   // ── Shake without session ──

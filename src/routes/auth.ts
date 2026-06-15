@@ -1,8 +1,35 @@
 import { Router } from 'express'
-import { createBusinessUser, createCustomerUser, signInBusiness, signInCustomer, signToken, resetPasswordByEmail } from '../services/auth.js'
+import { createBusinessUser, createCustomerUser, signInBusiness, signInCustomer, signToken, resetPasswordByEmail, verifyToken } from '../services/auth.js'
 import { z } from 'zod'
 
 const router = Router()
+
+function bearerToken(req: import('express').Request): string | null {
+  const header = req.headers.authorization
+  if (!header?.startsWith('Bearer ')) return null
+  return header.slice(7)
+}
+
+router.get('/session', (req, res) => {
+  const token = bearerToken(req)
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required' })
+  }
+  const user = verifyToken(token)
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid or expired token' })
+  }
+  res.json({
+    success: true,
+    data: {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.name,
+      phone: user.phone,
+    },
+  })
+})
 
 const signInSchema = z.object({
   email: z.string().email(),
