@@ -78,6 +78,18 @@ export interface CampaignRow {
   redeemedCount: number
 }
 
+export type PlayBlockReason =
+  | 'campaign_inactive'
+  | 'user_cap'
+  | 'daily_participant_limit'
+  | 'no_plays_remaining'
+
+/** Single-day campaigns use the full user cap for that day; multi-day uses perDayUserLimit. */
+export function effectivePerDayUserLimit(campaign: Pick<CampaignRow, 'startDate' | 'endDate' | 'userCap' | 'perDayUserLimit'>): number {
+  if (campaign.startDate === campaign.endDate) return campaign.userCap
+  return campaign.perDayUserLimit
+}
+
 function generatePin(): string {
   return String(Math.floor(100 + Math.random() * 900))
 }
@@ -198,6 +210,10 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
   const campaignId = nanoid()
   const pin = generatePin()
   const pinExpires = pinExpiresAtIso()
+  const perDayUserLimit =
+    payload.startDate === payload.endDate
+      ? payload.userCap
+      : Math.min(payload.perDayUserLimit, payload.userCap)
 
   const statements = [
     {
@@ -209,7 +225,7 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
       args: [
         campaignId, businessId, payload.name, payload.mechanic,
         payload.startDate, payload.endDate,
-        payload.userCap, payload.perDayUserLimit, payload.playsPerDay,
+        payload.userCap, perDayUserLimit, payload.playsPerDay,
         payload.winRatePercent, pin, pinExpires,
       ],
     },
@@ -549,6 +565,7 @@ export async function getPlayState(campaignId: string, customerId: string) {
     playsPerDay: eligibility.playsPerDay,
     canPlay: eligibility.canPlay,
     message: eligibility.message,
+    blockReason: eligibility.blockReason,
     winRatePercent: campaign.winRatePercent,
   }
 }
@@ -560,19 +577,41 @@ interface EligibilityResult {
   playsPerDay: number
   message: string
   isNewParticipant: boolean
+  blockReason: PlayBlockReason | null
 }
 
 export async function checkEligibility(
   campaign: CampaignRow,
   customerId: string,
 ): Promise<EligibilityResult> {
+  const base = {
+    playsPerDay: campaign.playsPerDay,
+    blockReason: null as PlayBlockReason | null,
+  }
+
   if (campaign.status !== 'active') {
-    return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign is not active', isNewParticipant: false }
+    return {
+      ...base,
+      canPlay: false,
+      playsRemaining: 0,
+      playsUsedToday: 0,
+      message: 'Campaign is not active',
+      isNewParticipant: false,
+      blockReason: 'campaign_inactive',
+    }
   }
 
   const today = todayInCampaignTz()
   if (today < campaign.startDate || today > campaign.endDate) {
-    return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign is not running today', isNewParticipant: false }
+    return {
+      ...base,
+      canPlay: false,
+      playsRemaining: 0,
+      playsUsedToday: 0,
+      message: 'Campaign is not running today',
+      isNewParticipant: false,
+      blockReason: 'campaign_inactive',
+    }
   }
 
   const partResult = await db.execute({
@@ -581,25 +620,6 @@ export async function checkEligibility(
   })
   const participation = partResult.rows[0]
   const isNewParticipant = !participation
-
-  if (isNewParticipant) {
-    const totalUsers = await db.execute({
-      sql: 'SELECT COUNT(*) as c FROM campaign_participations WHERE campaign_id = ?',
-      args: [campaign.id],
-    })
-    if (Number(totalUsers.rows[0]?.c ?? 0) >= campaign.userCap) {
-      return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Campaign user cap reached', isNewParticipant: true }
-    }
-
-    const dailyNew = await db.execute({
-      sql: `SELECT COUNT(*) as c FROM campaign_participations
-            WHERE campaign_id = ? AND ${istDateSql('first_played_at')} = ?`,
-      args: [campaign.id, today],
-    })
-    if (Number(dailyNew.rows[0]?.c ?? 0) >= campaign.perDayUserLimit) {
-      return { canPlay: false, playsRemaining: 0, playsUsedToday: 0, playsPerDay: campaign.playsPerDay, message: 'Daily participant limit reached. Try again tomorrow.', isNewParticipant: true }
-    }
-  }
 
   let playsToday = 0
   if (participation) {
@@ -612,22 +632,63 @@ export async function checkEligibility(
 
   if (playsRemaining <= 0) {
     return {
+      ...base,
       canPlay: false,
       playsRemaining: 0,
       playsUsedToday,
-      playsPerDay: campaign.playsPerDay,
       message: 'No plays remaining today. Come back tomorrow!',
       isNewParticipant,
+      blockReason: 'no_plays_remaining',
+    }
+  }
+
+  if (isNewParticipant) {
+    const totalUsers = await db.execute({
+      sql: 'SELECT COUNT(*) as c FROM campaign_participations WHERE campaign_id = ?',
+      args: [campaign.id],
+    })
+    if (Number(totalUsers.rows[0]?.c ?? 0) >= campaign.userCap) {
+      return {
+        ...base,
+        canPlay: false,
+        playsRemaining,
+        playsUsedToday,
+        message: 'Campaign user cap reached',
+        isNewParticipant: true,
+        blockReason: 'user_cap',
+      }
+    }
+
+    const dailyLimit = effectivePerDayUserLimit(campaign)
+    const dailyNew = await db.execute({
+      sql: `SELECT COUNT(*) as c FROM campaign_participations
+            WHERE campaign_id = ? AND ${istDateSql('first_played_at')} = ?`,
+      args: [campaign.id, today],
+    })
+    if (Number(dailyNew.rows[0]?.c ?? 0) >= dailyLimit) {
+      const isSingleDay = campaign.startDate === campaign.endDate
+      return {
+        ...base,
+        canPlay: false,
+        playsRemaining,
+        playsUsedToday,
+        message: isSingleDay
+          ? 'Campaign is full for today. No more participants can join.'
+          : 'Daily participant limit reached. Try again tomorrow.',
+        isNewParticipant: true,
+        blockReason: 'daily_participant_limit',
+      }
     }
   }
 
   return {
+    ...base,
     canPlay: true,
     playsRemaining,
     playsUsedToday,
-    playsPerDay: campaign.playsPerDay,
     message: 'Ready to play',
     isNewParticipant,
+    blockReason: null,
   }
 }
 

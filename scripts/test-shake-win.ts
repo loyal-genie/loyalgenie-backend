@@ -7,12 +7,13 @@
  * Requires API running at API_BASE_URL (default http://localhost:4000/api)
  */
 
-import { pickReward } from '../src/services/campaigns.js'
+import { pickReward, effectivePerDayUserLimit } from '../src/services/campaigns.js'
 import {
   rollWinWithDailyQuota,
   simulateDay,
   targetWinsForPlayers,
 } from '../src/services/daily-win-quota.js'
+import { todayInCampaignTz } from '../src/utils/campaign-dates.js'
 import { db } from '../src/db/client.js'
 
 const BASE = (process.env.API_BASE_URL ?? 'http://localhost:4000/api').replace(/\/$/, '')
@@ -52,7 +53,7 @@ async function api<T = unknown>(
 }
 
 function todayStr() {
-  return new Date().toISOString().slice(0, 10)
+  return todayInCampaignTz()
 }
 
 function daysFromNow(n: number) {
@@ -319,6 +320,17 @@ function runProbabilityTests() {
     { id: '2', name: 'Off', description: '', icon: '🏷️', sharePercent: 10 },
   ])
   assert('pickReward returns a reward', Boolean(reward.name), `picked: ${reward.name}`)
+
+  assert(
+    'effectivePerDayUserLimit: single-day uses userCap',
+    effectivePerDayUserLimit({ startDate: '2026-06-16', endDate: '2026-06-16', userCap: 200, perDayUserLimit: 50 }) === 200,
+    'expected 200',
+  )
+  assert(
+    'effectivePerDayUserLimit: multi-day uses perDayUserLimit',
+    effectivePerDayUserLimit({ startDate: '2026-06-16', endDate: '2026-07-16', userCap: 200, perDayUserLimit: 50 }) === 50,
+    'expected 50',
+  )
 }
 
 // ── API integration tests ─────────────────────────────────────────────────────
@@ -622,6 +634,53 @@ async function runApiTests() {
     '4th new player today blocked by daily user limit',
     dailyBlocked.status === 403,
     `status ${dailyBlocked.status} — ${dailyBlocked.json.error}`,
+  )
+
+  // Single-day campaign uses userCap as daily limit (not stale perDayUserLimit default)
+  const today = todayStr()
+  const todayCamp = await api<{ success?: boolean; data?: { id: string; perDayUserLimit: number } }>(
+    'POST',
+    '/campaigns',
+    {
+      name: `Today campaign ${RUN_ID}`,
+      mechanic: 'shake',
+      startDate: today,
+      endDate: today,
+      userCap: 8,
+      perDayUserLimit: 3,
+      playsPerDay: 1,
+      winRatePercent: 30,
+      rewards: [
+        { name: 'Free Coffee', icon: '☕', sharePercent: 90 },
+        { name: '10% Off', icon: '🏷️', sharePercent: 10 },
+      ],
+    },
+    vendorToken,
+  )
+  assert('Today campaign create OK', todayCamp.status === 201, `status ${todayCamp.status}`)
+  const todayId = todayCamp.json.data!.id
+  assert(
+    'Today campaign stores perDayUserLimit=userCap',
+    todayCamp.json.data?.perDayUserLimit === 8,
+    `limit=${todayCamp.json.data?.perDayUserLimit}`,
+  )
+  for (let n = 0; n < 4; n++) {
+    const c = await signupCustomer(600 + n)
+    const r = await playOnce(vendorToken, todayId, c.token)
+    assert(`Today campaign player ${n + 1}/4 OK (limit 8, not 3)`, r.status === 200, `status ${r.status}`)
+  }
+  for (let n = 4; n < 8; n++) {
+    const c = await signupCustomer(600 + n)
+    const r = await playOnce(vendorToken, todayId, c.token)
+    assert(`Today campaign player ${n + 1}/8 OK`, r.status === 200, `status ${r.status}`)
+  }
+  const todayBlockedState = await getPlayState((await signupCustomer(608)).token, todayId)
+  assert(
+    'Today campaign play-state: 9th player blocked but shows personal plays left',
+    todayBlockedState.json.data?.canPlay === false &&
+      todayBlockedState.json.data?.playsRemaining === 1 &&
+      todayBlockedState.json.data?.playsUsedToday === 0,
+    `canPlay=${todayBlockedState.json.data?.canPlay} remaining=${todayBlockedState.json.data?.playsRemaining}`,
   )
 
   // 1 play/day — second shake blocked
