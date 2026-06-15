@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 import { z } from 'zod'
 import { db } from '../db/client.js'
 import { getBusinessForUser } from './auth.js'
+import { rollWinWithDailyQuota } from './daily-win-quota.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 export const PIN_CYCLE_SECONDS = 120
@@ -29,6 +30,10 @@ export const createCampaignSchema = z.object({
 
 export type CreateCampaignPayload = z.infer<typeof createCampaignSchema>
 
+const updateRewardSchema = rewardSchema.extend({
+  id: z.string().optional(),
+})
+
 export const updateCampaignSchema = z.object({
   name: z.string().min(1).optional(),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -37,6 +42,7 @@ export const updateCampaignSchema = z.object({
   perDayUserLimit: z.number().int().min(1).optional(),
   winRatePercent: z.number().int().min(5).max(100).optional(),
   status: z.enum(['active', 'paused', 'ended']).optional(),
+  rewards: z.array(updateRewardSchema).min(1).optional(),
 })
 
 export type UpdateCampaignPayload = z.infer<typeof updateCampaignSchema>
@@ -223,6 +229,13 @@ export async function updateCampaign(
     throw new Error('END_DATE_BEFORE_START')
   }
 
+  if (payload.rewards !== undefined) {
+    const shareTotal = payload.rewards.reduce((s, r) => s + r.sharePercent, 0)
+    if (shareTotal !== 100) {
+      throw new Error('REWARD_SHARES_MUST_SUM_100')
+    }
+  }
+
   if (payload.status === 'active' && existing.status === 'ended') {
     throw new Error('CANNOT_REACTIVATE_ENDED')
   }
@@ -259,15 +272,41 @@ export async function updateCampaign(
     args.push(payload.status)
   }
 
-  if (fields.length === 0) {
+  if (fields.length === 0 && payload.rewards === undefined) {
     return existing
   }
 
-  args.push(campaignId, existing.businessId)
-  await db.execute({
-    sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
-    args,
-  })
+  if (fields.length > 0) {
+    args.push(campaignId, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.rewards !== undefined) {
+    const existingIds = new Set(existing.rewards.map(r => r.id))
+    const statements = [
+      {
+        sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
+        args: [campaignId],
+      },
+      ...payload.rewards.map((r, i) => ({
+        sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          r.id && existingIds.has(r.id) ? r.id : nanoid(),
+          campaignId,
+          r.name,
+          r.description ?? '',
+          r.icon,
+          r.sharePercent,
+          i,
+        ],
+      })),
+    ]
+    await db.batch(statements)
+  }
 
   return getCampaignForBusiness(userId, campaignId)
 }
@@ -544,6 +583,25 @@ export function rollWin(winRatePercent: number): boolean {
   return Math.random() < winRatePercent / 100
 }
 
+async function fetchDailyWinContext(campaignId: string, customerId: string) {
+  const result = await db.execute({
+    sql: `SELECT
+      (SELECT COUNT(DISTINCT customer_id) FROM game_plays
+       WHERE campaign_id = ? AND date(played_at) = date('now')) AS unique_players,
+      (SELECT COUNT(*) FROM game_plays
+       WHERE campaign_id = ? AND date(played_at) = date('now') AND won = 1) AS wins_today,
+      (SELECT COUNT(*) FROM game_plays
+       WHERE campaign_id = ? AND customer_id = ? AND date(played_at) = date('now')) AS customer_plays_today`,
+    args: [campaignId, campaignId, campaignId, customerId],
+  })
+  const row = result.rows[0]!
+  return {
+    uniquePlayersBefore: Number(row.unique_players ?? 0),
+    winsBefore: Number(row.wins_today ?? 0),
+    isFirstPlayToday: Number(row.customer_plays_today ?? 0) === 0,
+  }
+}
+
 export function pickReward(rewards: CampaignReward[]): CampaignReward {
   let roll = Math.random() * 100
   for (const reward of rewards) {
@@ -571,11 +629,21 @@ export async function executeShakePlay(
   const campaign = await getCampaignById(campaignId)
   const eligibility = await checkEligibility(campaign, customerId)
   if (!eligibility.canPlay) {
-    throw new Error(eligibility.message === 'Campaign user cap reached' ? 'USER_CAP_REACHED' :
-      eligibility.message.includes('Daily') ? 'DAILY_LIMIT_REACHED' : 'NO_PLAYS_REMAINING')
+    const msg = eligibility.message
+    throw new Error(
+      msg === 'Campaign user cap reached' ? 'USER_CAP_REACHED' :
+      msg.includes('Daily') ? 'DAILY_LIMIT_REACHED' :
+      msg === 'Campaign is not active' || msg === 'Campaign is not running today' ? 'CAMPAIGN_NOT_ACTIVE' :
+      'NO_PLAYS_REMAINING',
+    )
   }
 
-  const won = rollWin(campaign.winRatePercent)
+  const dailyCtx = await fetchDailyWinContext(campaignId, customerId)
+  const won = rollWinWithDailyQuota({
+    ...dailyCtx,
+    winRatePercent: campaign.winRatePercent,
+    perDayUserLimit: campaign.perDayUserLimit,
+  })
   const playId = nanoid()
   const today = todayDateStr()
 

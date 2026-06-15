@@ -156,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_business ON campaigns(business_id, stat
 CREATE INDEX IF NOT EXISTS idx_campaign_participations ON campaign_participations(campaign_id, customer_id);
 CREATE INDEX IF NOT EXISTS idx_customer_rewards_customer ON customer_rewards(customer_id);
 CREATE INDEX IF NOT EXISTS idx_game_plays_campaign ON game_plays(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_game_plays_campaign_date ON game_plays(campaign_id, played_at);
 CREATE INDEX IF NOT EXISTS idx_game_plays_customer ON game_plays(customer_id);
 `
 

@@ -147,6 +147,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
     if (message === 'END_DATE_BEFORE_START') {
       return res.status(422).json({ error: 'End date must be on or after start date' })
     }
+    if (message === 'REWARD_SHARES_MUST_SUM_100') {
+      return res.status(422).json({ error: 'Reward shares must sum to exactly 100%' })
+    }
     console.error(err)
     res.status(500).json({ error: 'Failed to update campaign' })
   }
@@ -204,6 +207,9 @@ router.post('/:id/shake', requireCustomerAuth, async (req, res) => {
     }
     if (message === 'NO_PLAYS_REMAINING') {
       return res.status(403).json({ error: 'No plays remaining today' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
     }
     if (message === 'USER_CAP_REACHED' || message === 'DAILY_LIMIT_REACHED') {
       return res.status(403).json({ error: message === 'USER_CAP_REACHED' ? 'Campaign is full' : 'Daily limit reached' })

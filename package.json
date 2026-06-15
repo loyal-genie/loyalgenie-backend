@@ -7,7 +7,8 @@
     "dev": "sh -c 'if command -v tsx >/dev/null 2>&1; then exec tsx watch src/index.ts; else exec node dist/index.js; fi'",
     "start": "node dist/index.js",
     "build": "tsc",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "test:shake": "tsx scripts/test-shake-win.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
