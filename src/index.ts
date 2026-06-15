@@ -5,6 +5,7 @@ import { migrate } from './db/migrate.js'
 import onboardingRoutes from './routes/onboarding.js'
 import authRoutes from './routes/auth.js'
 import businessRoutes from './routes/business.js'
+import campaignRoutes from './routes/campaigns.js'
 
 dotenv.config()
 
@@ -88,6 +89,7 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/onboarding', onboardingRoutes)
 app.use('/api/auth', authRoutes)
 app.use('/api/business', businessRoutes)
+app.use('/api/campaigns', campaignRoutes)
 
 async function start() {
   await migrate()

@@ -6,6 +6,13 @@ import {
   getBusinessQrForUser,
   updateBusinessProfile,
 } from '../services/business.js'
+import {
+  getVendorDashboardStats,
+  listVendorCustomers,
+  getVendorCustomer,
+  listPendingRedemptions,
+  markRedemptionRedeemed,
+} from '../services/vendor-analytics.js'
 
 const router = Router()
 
@@ -56,6 +63,76 @@ router.get('/me/qr', requireAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to generate QR code' })
+  }
+})
+
+router.get('/dashboard/stats', requireAuth, async (req, res) => {
+  try {
+    const stats = await getVendorDashboardStats(req.user!.id)
+    res.json({ success: true, data: stats })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATS_FAILED'
+    if (message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Complete onboarding first' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to fetch dashboard stats' })
+  }
+})
+
+router.get('/customers', requireAuth, async (req, res) => {
+  try {
+    const customers = await listVendorCustomers(req.user!.id)
+    res.json({ success: true, data: customers })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'LIST_FAILED'
+    if (message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Complete onboarding first' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to list customers' })
+  }
+})
+
+router.get('/customers/:id', requireAuth, async (req, res) => {
+  try {
+    const customer = await getVendorCustomer(req.user!.id, String(req.params.id))
+    res.json({ success: true, data: customer })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'FETCH_FAILED'
+    if (message === 'CUSTOMER_NOT_FOUND' || message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Customer not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to fetch customer' })
+  }
+})
+
+router.get('/redemptions/pending', requireAuth, async (req, res) => {
+  try {
+    const items = await listPendingRedemptions(req.user!.id)
+    res.json({ success: true, data: items })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'LIST_FAILED'
+    if (message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Complete onboarding first' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to list redemptions' })
+  }
+})
+
+router.patch('/redemptions/:id/redeem', requireAuth, async (req, res) => {
+  try {
+    await markRedemptionRedeemed(req.user!.id, String(req.params.id))
+    res.json({ success: true })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'REDEEM_FAILED'
+    if (message === 'REWARD_NOT_FOUND' || message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Reward not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to mark redeemed' })
   }
 })
 
