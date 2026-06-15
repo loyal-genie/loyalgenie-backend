@@ -2,7 +2,9 @@ import { Router } from 'express'
 import { requireAuth, requireCustomerAuth } from '../middleware/auth.js'
 import {
   createCampaignSchema,
+  updateCampaignSchema,
   createCampaign,
+  updateCampaign,
   listCampaignsForBusiness,
   getCampaignForBusiness,
   getCampaignPinForBusiness,
@@ -117,6 +119,36 @@ router.get('/:id', requireAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to fetch campaign' })
+  }
+})
+
+router.patch('/:id', requireAuth, async (req, res) => {
+  try {
+    const parsed = updateCampaignSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(422).json({
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      })
+    }
+    const campaign = await updateCampaign(req.user!.id, String(req.params.id), parsed.data)
+    res.json({ success: true, data: campaign })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'UPDATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    if (message === 'CAMPAIGN_ENDED' || message === 'CANNOT_REACTIVATE_ENDED') {
+      return res.status(403).json({ error: 'This campaign has ended and cannot be changed' })
+    }
+    if (message === 'USER_CAP_BELOW_CURRENT') {
+      return res.status(422).json({ error: 'User cap cannot be below the number of players who already joined' })
+    }
+    if (message === 'END_DATE_BEFORE_START') {
+      return res.status(422).json({ error: 'End date must be on or after start date' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to update campaign' })
   }
 })
 

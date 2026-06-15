@@ -29,6 +29,17 @@ export const createCampaignSchema = z.object({
 
 export type CreateCampaignPayload = z.infer<typeof createCampaignSchema>
 
+export const updateCampaignSchema = z.object({
+  name: z.string().min(1).optional(),
+  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  userCap: z.number().int().min(1).optional(),
+  playsPerDay: z.number().int().min(1).max(10).optional(),
+  winRatePercent: z.number().int().min(5).max(100).optional(),
+  status: z.enum(['active', 'paused', 'ended']).optional(),
+})
+
+export type UpdateCampaignPayload = z.infer<typeof updateCampaignSchema>
+
 export interface CampaignReward {
   id: string
   name: string
@@ -190,6 +201,70 @@ export async function listCampaignsForBusiness(userId: string) {
     args: [businessId],
   })
   return Promise.all(result.rows.map(row => rowToCampaign(row as Record<string, unknown>)))
+}
+
+export async function updateCampaign(
+  userId: string,
+  campaignId: string,
+  payload: UpdateCampaignPayload,
+) {
+  const existing = await getCampaignForBusiness(userId, campaignId)
+
+  if (existing.status === 'ended') {
+    throw new Error('CAMPAIGN_ENDED')
+  }
+
+  if (payload.userCap !== undefined && payload.userCap < existing.currentUsers) {
+    throw new Error('USER_CAP_BELOW_CURRENT')
+  }
+
+  if (payload.endDate !== undefined && payload.endDate < existing.startDate) {
+    throw new Error('END_DATE_BEFORE_START')
+  }
+
+  if (payload.status === 'active' && existing.status === 'ended') {
+    throw new Error('CANNOT_REACTIVATE_ENDED')
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?')
+    args.push(payload.userCap)
+  }
+  if (payload.playsPerDay !== undefined) {
+    fields.push('plays_per_day = ?')
+    args.push(payload.playsPerDay)
+  }
+  if (payload.winRatePercent !== undefined) {
+    fields.push('win_rate_percent = ?')
+    args.push(payload.winRatePercent)
+  }
+  if (payload.status !== undefined) {
+    fields.push('status = ?')
+    args.push(payload.status)
+  }
+
+  if (fields.length === 0) {
+    return existing
+  }
+
+  args.push(campaignId, existing.businessId)
+  await db.execute({
+    sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+    args,
+  })
+
+  return getCampaignForBusiness(userId, campaignId)
 }
 
 export async function getCampaignForBusiness(userId: string, campaignId: string) {
