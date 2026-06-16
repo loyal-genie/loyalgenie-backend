@@ -9,6 +9,11 @@
     "build": "tsc",
     "db:migrate": "tsx src/db/migrate.ts",
     "test:shake": "tsx scripts/test-shake-win.ts",
+    "test:stamp": "tsx scripts/test-stamp-cards.ts",
+    "test:stamp:e2e": "tsx scripts/test-stamp-e2e-prod.ts",
+    "test:stamp:frontend": "tsx scripts/test-stamp-frontend-flow.ts",
+    "test:stamp:manual": "bash scripts/test-stamp-manual-user.sh",
+    "sim:stamp:10d": "tsx scripts/sim-stamp-10-days.ts",
     "test:shake:e2e": "tsx scripts/test-shake-e2e-10-users.ts"
   },
   "dependencies": {

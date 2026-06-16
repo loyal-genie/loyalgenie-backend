@@ -162,7 +162,34 @@ CREATE INDEX IF NOT EXISTS idx_game_plays_customer ON game_plays(customer_id);
 
 const COLUMN_PATCHES_CAMPAIGNS = [
   'ALTER TABLE campaign_participations ADD COLUMN last_played_at TEXT',
+  'ALTER TABLE campaigns ADD COLUMN cap_filled_at TEXT',
+  'ALTER TABLE campaigns ADD COLUMN claim_period_days INTEGER NOT NULL DEFAULT 30',
+  'ALTER TABLE campaign_rewards ADD COLUMN reward_tier TEXT',
 ]
+
+const STAMP_CARD_MIGRATIONS = `
+CREATE TABLE IF NOT EXISTS stamp_cards (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  stamps_collected INTEGER NOT NULL DEFAULT 0,
+  surprise_trigger_at INTEGER NOT NULL,
+  big_trigger_at INTEGER NOT NULL,
+  surprise_awarded INTEGER NOT NULL DEFAULT 0,
+  big_awarded INTEGER NOT NULL DEFAULT 0,
+  surprise_play_id TEXT,
+  big_play_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  enrolled_at TEXT NOT NULL,
+  completed_at TEXT,
+  expired_at TEXT,
+  last_stamp_date TEXT,
+  UNIQUE(campaign_id, customer_id),
+  FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stamp_cards_campaign ON stamp_cards(campaign_id, status);
+`
 
 async function runOptional(sql: string) {
   try {
@@ -178,6 +205,7 @@ export async function migrate() {
   for (const sql of INDEX_PATCHES) await runOptional(sql)
   await db.executeMultiple(CAMPAIGN_MIGRATIONS)
   for (const sql of COLUMN_PATCHES_CAMPAIGNS) await runOptional(sql)
+  await db.executeMultiple(STAMP_CARD_MIGRATIONS)
   console.log('Database migrations applied.')
 }
 

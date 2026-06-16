@@ -15,6 +15,10 @@ import {
   executeShakePlay,
   listCustomerRewards,
 } from '../services/campaigns.js'
+import {
+  getStampState,
+  executeStampCollect,
+} from '../services/stamp-cards.js'
 
 const router = Router()
 
@@ -74,6 +78,9 @@ router.post('/', requireAuth, async (req, res) => {
     }
     if (message === 'REWARD_SHARES_MUST_SUM_100') {
       return res.status(422).json({ error: 'Reward shares must sum to exactly 100%' })
+    }
+    if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL') {
+      return res.status(422).json({ error: 'Invalid stamp card configuration' })
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to create campaign' })
@@ -216,6 +223,53 @@ router.post('/:id/shake', requireCustomerAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to process shake' })
+  }
+})
+
+router.get('/:id/stamp-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getStampState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_STAMP_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get stamp state' })
+  }
+})
+
+router.post('/:id/stamp', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await executeStampCollect(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STAMP_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'Campaign is full' })
+    }
+    if (message === 'STAMP_ALREADY_COLLECTED_TODAY') {
+      return res.status(403).json({ error: 'You already collected your stamp today' })
+    }
+    if (message === 'CARD_EXPIRED' || message === 'CLAIM_PERIOD_ENDED') {
+      return res.status(403).json({ error: 'Your stamp card has expired' })
+    }
+    if (message === 'CARD_COMPLETE') {
+      return res.status(403).json({ error: 'Your stamp card is complete' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to collect stamp' })
   }
 })
 

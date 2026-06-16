@@ -16,3 +16,6 @@ dist/
 # IDE
 .idea/
 .vscode/
+
+# Local date simulator (npm run sim:stamp:10d)
+.campaign-date-override

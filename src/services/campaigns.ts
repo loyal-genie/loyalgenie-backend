@@ -4,7 +4,24 @@ import { z } from 'zod'
 import { db } from '../db/client.js'
 import { getBusinessForUser } from './auth.js'
 import { rollWinWithDailyQuota } from './daily-win-quota.js'
-import { todayInCampaignTz, istDateSql } from '../utils/campaign-dates.js'
+import {
+  todayInCampaignTz,
+  istDateSql,
+  nextMidnightIsoInCampaignTz,
+  nowInCampaignTz,
+} from '../utils/campaign-dates.js'
+import {
+  validateStampConfig,
+  PIN_CYCLE_STAMP_SECONDS,
+  isStampCampaignActive,
+  isPinActiveForStamp,
+  parseStampCampaignMeta,
+  stampPinGraceExpired,
+  getClaimDeadline,
+  getStampCampaignStats,
+  type StampCampaignStats,
+} from './stamp-cards.js'
+import { createStampCampaignSchema, type CreateStampCampaignPayload } from './stamp-campaign-schema.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 export const PIN_CYCLE_SECONDS = 120
@@ -17,7 +34,7 @@ const rewardSchema = z.object({
   sharePercent: z.number().int().min(1).max(100),
 })
 
-export const createCampaignSchema = z.object({
+export const createShakeCampaignSchema = z.object({
   name: z.string().min(1),
   mechanic: z.literal('shake').default('shake'),
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -29,7 +46,13 @@ export const createCampaignSchema = z.object({
   rewards: z.array(rewardSchema).min(1),
 })
 
+export const createCampaignSchema = z.discriminatedUnion('mechanic', [
+  createShakeCampaignSchema,
+  createStampCampaignSchema,
+])
+
 export type CreateCampaignPayload = z.infer<typeof createCampaignSchema>
+export type CreateShakeCampaignPayload = z.infer<typeof createShakeCampaignSchema>
 
 const updateRewardSchema = rewardSchema.extend({
   id: z.string().optional(),
@@ -54,6 +77,7 @@ export interface CampaignReward {
   description: string
   icon: string
   sharePercent: number
+  rewardTier?: string | null
 }
 
 export interface CampaignRow {
@@ -70,12 +94,16 @@ export interface CampaignRow {
   winRatePercent: number
   pin: string | null
   pinExpiresAt: string | null
+  configJson: string | null
+  claimPeriodDays: number
+  capFilledAt: string | null
   createdAt: string
   rewards: CampaignReward[]
   currentUsers: number
   participations: number
   rewardsClaimed: number
   redeemedCount: number
+  stampStats?: StampCampaignStats | null
 }
 
 export type PlayBlockReason =
@@ -94,8 +122,15 @@ function generatePin(): string {
   return String(Math.floor(100 + Math.random() * 900))
 }
 
-function pinExpiresAtIso(): string {
-  return new Date(Date.now() + PIN_CYCLE_SECONDS * 1000).toISOString()
+function pinExpiresAtIso(mechanic = 'shake'): string {
+  if (mechanic === 'stamp') {
+    return nextMidnightIsoInCampaignTz(nowInCampaignTz())
+  }
+  return new Date(nowInCampaignTz().getTime() + PIN_CYCLE_SECONDS * 1000).toISOString()
+}
+
+export function pinCycleSecondsForMechanic(mechanic: string): number {
+  return mechanic === 'stamp' ? PIN_CYCLE_STAMP_SECONDS : PIN_CYCLE_SECONDS
 }
 
 async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
@@ -118,8 +153,28 @@ async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
 async function ensureCampaignNotPastEnd(row: Record<string, unknown>): Promise<Record<string, unknown>> {
   const status = row.status as string
   const endDate = row.end_date as string
+  const mechanic = row.mechanic as string
   const today = todayInCampaignTz()
-  if ((status === 'active' || status === 'paused') && today > endDate) {
+
+  if (status !== 'active' && status !== 'paused') {
+    return row
+  }
+
+  if (mechanic === 'stamp') {
+    const claimPeriodDays = Number(row.claim_period_days ?? 30)
+    const capFilledAt = (row.cap_filled_at as string) ?? null
+    const deadline = getClaimDeadline(endDate, claimPeriodDays, capFilledAt)
+    if (today > deadline) {
+      await db.execute({
+        sql: `UPDATE campaigns SET status = 'ended' WHERE id = ?`,
+        args: [row.id as string],
+      })
+      return { ...row, status: 'ended' }
+    }
+    return row
+  }
+
+  if (today > endDate) {
     await db.execute({
       sql: `UPDATE campaigns SET status = 'ended' WHERE id = ?`,
       args: [row.id as string],
@@ -137,7 +192,7 @@ async function getBusinessIdForUser(userId: string): Promise<string> {
 
 async function fetchRewards(campaignId: string): Promise<CampaignReward[]> {
   const result = await db.execute({
-    sql: `SELECT id, name, description, icon, share_percent FROM campaign_rewards
+    sql: `SELECT id, name, description, icon, share_percent, reward_tier FROM campaign_rewards
           WHERE campaign_id = ? ORDER BY sort_order ASC`,
     args: [campaignId],
   })
@@ -147,6 +202,7 @@ async function fetchRewards(campaignId: string): Promise<CampaignReward[]> {
     description: (row.description as string) ?? '',
     icon: (row.icon as string) ?? '🎁',
     sharePercent: row.share_percent as number,
+    rewardTier: (row.reward_tier as string) ?? null,
   }))
 }
 
@@ -180,11 +236,12 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   const id = row.id as string
   const stats = await fetchStats(id)
   const rewards = await fetchRewards(id)
-  return {
+  const mechanic = row.mechanic as string
+  const base: CampaignRow = {
     id,
     businessId: row.business_id as string,
     name: row.name as string,
-    mechanic: row.mechanic as string,
+    mechanic,
     status: row.status as string,
     startDate: row.start_date as string,
     endDate: row.end_date as string,
@@ -194,13 +251,20 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
     winRatePercent: row.win_rate_percent as number,
     pin: (row.pin as string) ?? null,
     pinExpiresAt: (row.pin_expires_at as string) ?? null,
+    configJson: (row.config_json as string) ?? null,
+    claimPeriodDays: Number(row.claim_period_days ?? 30),
+    capFilledAt: (row.cap_filled_at as string) ?? null,
     createdAt: row.created_at as string,
     rewards,
     ...stats,
   }
+  if (mechanic === 'stamp') {
+    base.stampStats = await getStampCampaignStats(id)
+  }
+  return base
 }
 
-export async function createCampaign(userId: string, payload: CreateCampaignPayload) {
+async function createShakeCampaign(userId: string, payload: CreateShakeCampaignPayload) {
   const shareTotal = payload.rewards.reduce((s, r) => s + r.sharePercent, 0)
   if (shareTotal !== 100) {
     throw new Error('REWARD_SHARES_MUST_SUM_100')
@@ -209,7 +273,7 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
   const businessId = await getBusinessIdForUser(userId)
   const campaignId = nanoid()
   const pin = generatePin()
-  const pinExpires = pinExpiresAtIso()
+  const pinExpires = pinExpiresAtIso('shake')
   const perDayUserLimit =
     payload.startDate === payload.endDate
       ? payload.userCap
@@ -220,8 +284,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
       sql: `INSERT INTO campaigns (
         id, business_id, name, mechanic, status, start_date, end_date,
         user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
-        pin, pin_expires_at
-      ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
       args: [
         campaignId, businessId, payload.name, payload.mechanic,
         payload.startDate, payload.endDate,
@@ -230,8 +294,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
       ],
     },
     ...payload.rewards.map((r, i) => ({
-      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
       args: [nanoid(), campaignId, r.name, r.description ?? '', r.icon, r.sharePercent, i],
     })),
   ]
@@ -243,6 +307,78 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     args: [campaignId],
   })
   return await rowToCampaign(result.rows[0] as Record<string, unknown>)
+}
+
+async function createStampCampaign(userId: string, payload: CreateStampCampaignPayload) {
+  validateStampConfig(payload.stampConfig)
+
+  for (const tier of ['surprise', 'big'] as const) {
+    const mode = payload.stampConfig[`${tier}Mode`]
+    const entries = payload.rewards[tier]
+    if (mode === 'single' && entries.length < 1) {
+      throw new Error('INVALID_STAMP_REWARDS')
+    }
+    if (mode === 'pool') {
+      const total = entries.reduce((s, r) => s + r.winPercent, 0)
+      if (total > 100 || total < 1) {
+        throw new Error('INVALID_STAMP_POOL')
+      }
+    }
+  }
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('stamp')
+  const configJson = JSON.stringify({
+    type: 'stamp',
+    stampConfig: payload.stampConfig,
+  })
+
+  const rewardStatements: { sql: string; args: (string | number | null)[] }[] = []
+  let sortOrder = 0
+  for (const tier of ['surprise', 'big'] as const) {
+    for (const r of payload.rewards[tier]) {
+      rewardStatements.push({
+        sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          nanoid(), campaignId, r.name, r.description ?? '', r.icon,
+          payload.stampConfig[`${tier}Mode`] === 'single' ? 100 : r.winPercent,
+          sortOrder++, tier,
+        ],
+      })
+    }
+  }
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        config_json, pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'stamp', 'active', ?, ?, ?, 0, 1, 0, ?, ?, ?, ?)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.userCap,
+        configJson, pin, pinExpires, payload.claimPeriodDays,
+      ],
+    },
+    ...rewardStatements,
+  ])
+
+  const result = await db.execute({
+    sql: 'SELECT * FROM campaigns WHERE id = ?',
+    args: [campaignId],
+  })
+  return await rowToCampaign(result.rows[0] as Record<string, unknown>)
+}
+
+export async function createCampaign(userId: string, payload: CreateCampaignPayload) {
+  if (payload.mechanic === 'stamp') {
+    return createStampCampaign(userId, payload)
+  }
+  return createShakeCampaign(userId, payload)
 }
 
 export async function listCampaignsForBusiness(userId: string) {
@@ -370,14 +506,25 @@ export async function getCampaignForBusiness(userId: string, campaignId: string)
 export async function getCampaignPinForBusiness(userId: string, campaignId: string) {
   const campaign = await getCampaignForBusiness(userId, campaignId)
   const refreshed = await rotatePinIfExpired(campaign.id)
-  const secondsRemaining = refreshed.pinExpiresAt
-    ? Math.max(0, Math.floor((new Date(refreshed.pinExpiresAt).getTime() - Date.now()) / 1000))
+  const cycleSeconds = pinCycleSecondsForMechanic(refreshed.mechanic)
+  const pinActive = refreshed.mechanic === 'stamp'
+    ? isPinActiveForStamp(
+        refreshed.status,
+        refreshed.startDate,
+        refreshed.endDate,
+        refreshed.claimPeriodDays,
+        refreshed.capFilledAt,
+      )
+    : refreshed.status === 'active'
+  const secondsRemaining = refreshed.pinExpiresAt && pinActive
+    ? Math.max(0, Math.floor((new Date(refreshed.pinExpiresAt).getTime() - nowInCampaignTz().getTime()) / 1000))
     : 0
   return {
-    pin: refreshed.pin,
-    expiresAt: refreshed.pinExpiresAt,
+    pin: pinActive ? refreshed.pin : null,
+    expiresAt: pinActive ? refreshed.pinExpiresAt : null,
     secondsRemaining,
-    cycleSeconds: PIN_CYCLE_SECONDS,
+    cycleSeconds,
+    pinActive,
   }
 }
 
@@ -390,12 +537,23 @@ export async function rotatePinIfExpired(campaignId: string) {
   if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
 
   const current = await ensureCampaignNotPastEnd(row as Record<string, unknown>)
+  const mechanic = current.mechanic as string
   const expiresAt = current.pin_expires_at as string | null
-  const needsRotation = !expiresAt || new Date(expiresAt).getTime() <= Date.now()
+  const needsRotation = !expiresAt || new Date(expiresAt).getTime() <= nowInCampaignTz().getTime()
 
-  if (needsRotation && current.status === 'active') {
+  const pinStillNeeded = mechanic === 'stamp'
+    ? isPinActiveForStamp(
+        current.status as string,
+        current.start_date as string,
+        current.end_date as string,
+        Number(current.claim_period_days ?? 30),
+        (current.cap_filled_at as string) ?? null,
+      )
+    : current.status === 'active'
+
+  if (needsRotation && pinStillNeeded) {
     const pin = generatePin()
-    const pinExpires = pinExpiresAtIso()
+    const pinExpires = pinExpiresAtIso(mechanic)
     await db.execute({
       sql: 'UPDATE campaigns SET pin = ?, pin_expires_at = ? WHERE id = ?',
       args: [pin, pinExpires, campaignId],
@@ -426,22 +584,34 @@ export async function listBusinessesWithActiveCampaigns() {
           INNER JOIN campaigns c ON c.business_id = b.id
           WHERE c.status = 'active'
             AND c.start_date <= ?
-            AND c.end_date >= ?
           ORDER BY b.name ASC`,
-    args: [today, today],
+    args: [today],
   })
 
   const businesses = await Promise.all(
     result.rows.map(async row => {
       const businessId = row.id as string
       const campaignsResult = await db.execute({
-        sql: `SELECT id, name, mechanic, start_date, end_date, win_rate_percent, plays_per_day
+        sql: `SELECT id, name, mechanic, start_date, end_date, win_rate_percent, plays_per_day,
+                     claim_period_days, cap_filled_at, config_json
               FROM campaigns
-              WHERE business_id = ? AND status = 'active'
-                AND start_date <= ?
-                AND end_date >= ?
-              ORDER BY created_at DESC`,
-        args: [businessId, today, today],
+              WHERE business_id = ? AND status = 'active' AND start_date <= ?`,
+        args: [businessId, today],
+      })
+      const campaigns = campaignsResult.rows.filter(c => {
+        const mechanic = c.mechanic as string
+        if (mechanic === 'stamp') {
+          return isStampCampaignActive(
+            'active',
+            c.start_date as string,
+            c.end_date as string,
+            Number(c.claim_period_days ?? 30),
+            (c.cap_filled_at as string) ?? null,
+            today,
+          )
+        }
+        const endDate = c.end_date as string
+        return today <= endDate
       })
       return {
         id: businessId,
@@ -450,7 +620,7 @@ export async function listBusinessesWithActiveCampaigns() {
         businessType: (row.business_type as string) ?? 'Business',
         city: (row.city as string) ?? '',
         brandColor: (row.brand_color as string) ?? '#7C3AED',
-        campaigns: campaignsResult.rows.map(c => ({
+        campaigns: campaigns.map(c => ({
           id: c.id as string,
           name: c.name as string,
           mechanic: c.mechanic as string,
@@ -463,13 +633,52 @@ export async function listBusinessesWithActiveCampaigns() {
     }),
   )
 
-  return businesses
+  return businesses.filter(b => b.campaigns.length > 0)
 }
 
 export async function getPublicCampaign(campaignId: string) {
   const campaign = await getCampaignById(campaignId)
-  if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
   const today = todayInCampaignTz()
+
+  if (campaign.mechanic === 'stamp') {
+    const active = isStampCampaignActive(
+      campaign.status,
+      campaign.startDate,
+      campaign.endDate,
+      campaign.claimPeriodDays,
+      campaign.capFilledAt,
+      today,
+    )
+    if (!active) throw new Error('CAMPAIGN_NOT_ACTIVE')
+
+    const meta = parseStampCampaignMeta({
+      config_json: campaign.configJson,
+      claim_period_days: campaign.claimPeriodDays,
+      cap_filled_at: campaign.capFilledAt,
+    })
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      claimPeriodDays: campaign.claimPeriodDays,
+      stampConfig: meta?.config ?? null,
+      rewards: campaign.rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+        tier: r.rewardTier,
+      })),
+    }
+  }
+
+  if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
   if (today < campaign.startDate || today > campaign.endDate) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
@@ -518,11 +727,24 @@ export function verifyPlaySession(token: string, campaignId: string, customerId:
 
 export async function verifyCampaignPin(campaignId: string, pin: string, customerId: string) {
   const campaign = await getCampaignById(campaignId)
-  if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
-
   const today = todayInCampaignTz()
-  if (today < campaign.startDate || today > campaign.endDate) {
-    throw new Error('CAMPAIGN_NOT_ACTIVE')
+
+  if (campaign.mechanic === 'stamp') {
+    if (!isStampCampaignActive(
+      campaign.status,
+      campaign.startDate,
+      campaign.endDate,
+      campaign.claimPeriodDays,
+      campaign.capFilledAt,
+      today,
+    )) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+  } else {
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    if (today < campaign.startDate || today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
   }
 
   const normalizedPin = pin.trim()
@@ -530,25 +752,30 @@ export async function verifyCampaignPin(campaignId: string, pin: string, custome
     throw new Error('INVALID_PIN')
   }
 
-  // Compare against stored PIN *before* rotating — avoids rejecting the code staff is still showing.
   const storedPin = campaign.pin ? String(campaign.pin) : null
   if (!storedPin || storedPin !== normalizedPin) {
     throw new Error('INVALID_PIN')
   }
 
-  const PIN_VERIFY_GRACE_SECONDS = 45
-  if (campaign.pinExpiresAt) {
-    const expiredAtMs = new Date(campaign.pinExpiresAt).getTime()
-    if (Date.now() > expiredAtMs + PIN_VERIFY_GRACE_SECONDS * 1000) {
+  if (campaign.mechanic === 'stamp') {
+    if (stampPinGraceExpired(campaign.pinExpiresAt)) {
       await rotatePinIfExpired(campaignId)
       throw new Error('INVALID_PIN')
+    }
+  } else {
+    const PIN_VERIFY_GRACE_SECONDS = 45
+    if (campaign.pinExpiresAt) {
+      const expiredAtMs = new Date(campaign.pinExpiresAt).getTime()
+      if (nowInCampaignTz().getTime() > expiredAtMs + PIN_VERIFY_GRACE_SECONDS * 1000) {
+        await rotatePinIfExpired(campaignId)
+        throw new Error('INVALID_PIN')
+      }
     }
   }
 
   const playSessionToken = signPlaySession(campaignId, customerId)
 
-  // Refresh PIN after successful verify when the cycle has elapsed
-  if (campaign.pinExpiresAt && new Date(campaign.pinExpiresAt).getTime() <= Date.now()) {
+  if (campaign.pinExpiresAt && new Date(campaign.pinExpiresAt).getTime() <= nowInCampaignTz().getTime()) {
     await rotatePinIfExpired(campaignId)
   }
 
