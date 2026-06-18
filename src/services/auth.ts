@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { nanoid } from 'nanoid'
 import { db } from '../db/client.js'
+import { toStoredPhone, formatPhoneLocal } from './phone.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 const JWT_EXPIRES = '30d'
@@ -107,42 +108,63 @@ export async function getUserByEmail(email: string) {
   return result.rows[0] ?? null
 }
 
-export async function createCustomerUser(name: string, phone: string, email: string, password: string) {
-  const normalizedEmail = email.toLowerCase()
+export async function getCustomerByPhone(phone: string) {
+  const stored = toStoredPhone(phone)
+  const local = formatPhoneLocal(phone)
+  const candidates = [stored, local, `91${local}`, `+91${local}`]
+
+  for (const candidate of [...new Set(candidates)]) {
+    const result = await db.execute({
+      sql: 'SELECT id, name, phone, email, date_of_birth FROM customer_users WHERE phone = ?',
+      args: [candidate],
+    })
+    const row = result.rows[0]
+    if (row) {
+      return {
+        id: row.id as string,
+        name: row.name as string,
+        phone: row.phone as string,
+        email: (row.email as string | null) ?? '',
+        dateOfBirth: (row.date_of_birth as string | null) ?? undefined,
+      }
+    }
+  }
+  return null
+}
+
+export async function createCustomerUser(
+  name: string,
+  phone: string,
+  dateOfBirth: string,
+  email?: string | null,
+) {
+  const normalizedEmail = email?.trim().toLowerCase() || null
   const existing = await db.execute({
-    sql: 'SELECT id FROM customer_users WHERE email = ? OR phone = ?',
-    args: [normalizedEmail, phone],
+    sql: 'SELECT id FROM customer_users WHERE phone = ? OR (email IS NOT NULL AND email = ?)',
+    args: [phone, normalizedEmail ?? ''],
   })
   if (existing.rows.length > 0) throw new Error('EMAIL_OR_PHONE_EXISTS')
 
   const id = nanoid()
-  const passwordHash = await hashPassword(password)
   await db.execute({
-    sql: 'INSERT INTO customer_users (id, name, phone, email, password_hash) VALUES (?, ?, ?, ?, ?)',
-    args: [id, name.trim(), phone.trim(), normalizedEmail, passwordHash],
+    sql: `INSERT INTO customer_users (id, name, phone, email, password_hash, date_of_birth, phone_verified)
+          VALUES (?, ?, ?, ?, NULL, ?, 1)`,
+    args: [id, name.trim(), phone, normalizedEmail, dateOfBirth],
   })
-  return { id, name: name.trim(), phone: phone.trim(), email: normalizedEmail }
+  return {
+    id,
+    name: name.trim(),
+    phone,
+    email: normalizedEmail ?? '',
+    dateOfBirth,
+  }
 }
 
-export async function signInCustomer(email: string, password: string) {
-  const result = await db.execute({
-    sql: 'SELECT id, name, phone, email, password_hash FROM customer_users WHERE email = ?',
-    args: [email.toLowerCase()],
-  })
-  const row = result.rows[0]
-  if (!row) throw new Error('INVALID_CREDENTIALS')
+export async function signInCustomerByPhone(phone: string) {
+  const user = await getCustomerByPhone(phone)
+  if (!user) throw new Error('PHONE_NOT_FOUND')
 
-  const valid = await verifyPassword(password, row.password_hash as string)
-  if (!valid) throw new Error('INVALID_CREDENTIALS')
-
-  const user = {
-    id: row.id as string,
-    name: row.name as string,
-    phone: row.phone as string,
-    email: row.email as string,
-    role: 'customer' as const,
-  }
-  const token = signToken(user)
+  const token = signToken({ ...user, role: 'customer' })
 
   return {
     token,

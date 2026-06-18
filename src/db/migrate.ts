@@ -232,7 +232,108 @@ export async function migrate() {
   await db.executeMultiple(CAMPAIGN_MIGRATIONS)
   for (const sql of COLUMN_PATCHES_CAMPAIGNS) await runOptional(sql)
   await db.executeMultiple(STAMP_CARD_MIGRATIONS)
+  await migrateCustomerUsersForOtp()
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS otp_verifications (
+      phone TEXT PRIMARY KEY,
+      otp_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `)
   console.log('Database migrations applied.')
+}
+
+async function migrateCustomerUsersForOtp() {
+  const tables = await db.execute(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('customer_users', 'customer_users_v2')`,
+  )
+  const tableNames = new Set(tables.rows.map((r) => r.name as string))
+
+  if (tableNames.has('customer_users')) {
+    const cols = await db.execute('PRAGMA table_info(customer_users)')
+    const hasDob = cols.rows.some((r) => r.name === 'date_of_birth')
+    if (hasDob) return
+  } else if (!tableNames.has('customer_users_v2')) {
+    return
+  }
+
+  // Recover from a previous failed migration attempt.
+  if (tableNames.has('customer_users_v2')) {
+    await db.execute('DROP TABLE customer_users_v2')
+  }
+
+  if (!tableNames.has('customer_users')) return
+
+  const rows = await db.execute(
+    'SELECT id, name, phone, email, password_hash, created_at FROM customer_users ORDER BY created_at ASC',
+  )
+
+  function normalizePhone(phone: string): string {
+    const digits = phone.replace(/\D/g, '')
+    if (digits.length === 10) return `+91${digits}`
+    if (digits.length === 12 && digits.startsWith('91')) return `+91${digits.slice(2)}`
+    if (digits.length === 11 && digits.startsWith('0')) return `+91${digits.slice(1)}`
+    return phone.trim()
+  }
+
+  const byPhone = new Map<string, Record<string, unknown>>()
+  for (const row of rows.rows) {
+    const phone = normalizePhone(row.phone as string)
+    const existing = byPhone.get(phone)
+    if (!existing) {
+      byPhone.set(phone, row as Record<string, unknown>)
+      continue
+    }
+    console.warn(`Migration: skipping duplicate phone ${phone} (user ${row.id as string})`)
+  }
+
+  const usedEmails = new Set<string>()
+  const dedupedRows: Record<string, unknown>[] = []
+  for (const row of byPhone.values()) {
+    const email = (row.email as string | null)?.trim().toLowerCase() || null
+    if (email && usedEmails.has(email)) {
+      console.warn(`Migration: clearing duplicate email ${email} for user ${row.id as string}`)
+      dedupedRows.push({ ...row, email: null })
+      continue
+    }
+    if (email) usedEmails.add(email)
+    dedupedRows.push({ ...row, email })
+  }
+
+  await db.execute(`
+    CREATE TABLE customer_users_v2 (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      phone TEXT NOT NULL UNIQUE,
+      email TEXT UNIQUE,
+      password_hash TEXT,
+      date_of_birth TEXT,
+      phone_verified INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
+  for (const row of dedupedRows) {
+    const email = (row.email as string | null)?.trim() || null
+    await db.execute({
+      sql: `INSERT INTO customer_users_v2 (id, name, phone, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [
+        row.id as string,
+        row.name as string,
+        normalizePhone(row.phone as string),
+        email,
+        (row.password_hash as string | null) ?? null,
+        row.created_at as string,
+      ],
+    })
+  }
+
+  await db.execute('DROP TABLE customer_users')
+  await db.execute('ALTER TABLE customer_users_v2 RENAME TO customer_users')
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_customer_users_phone ON customer_users(phone)')
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_customer_users_email ON customer_users(email)')
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

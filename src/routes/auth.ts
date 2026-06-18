@@ -1,5 +1,16 @@
 import { Router } from 'express'
-import { createBusinessUser, createCustomerUser, signInBusiness, signInCustomer, signToken, resetPasswordByEmail, verifyToken } from '../services/auth.js'
+import {
+  createBusinessUser,
+  createCustomerUser,
+  signInBusiness,
+  signInCustomerByPhone,
+  signToken,
+  resetPasswordByEmail,
+  verifyToken,
+  getCustomerByPhone,
+} from '../services/auth.js'
+import { sendOtp, verifyOtp } from '../services/msg91.js'
+import { toStoredPhone } from '../services/phone.js'
 import { z } from 'zod'
 
 const router = Router()
@@ -31,19 +42,37 @@ router.get('/session', (req, res) => {
   })
 })
 
+const phoneSchema = z.object({
+  phone: z.string().min(10, 'Valid phone number is required'),
+})
+
+const otpSendSchema = phoneSchema.extend({
+  purpose: z.enum(['signin', 'signup']),
+})
+
+const otpVerifySchema = phoneSchema.extend({
+  otp: z.string().length(6, 'Enter the 6-digit OTP'),
+})
+
+const customerSignUpSchema = z.object({
+  name: z.string().min(2, 'Name is required'),
+  phone: z.string().min(10, 'Valid phone number is required'),
+  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth is required'),
+  email: z.string().email().optional().or(z.literal('')),
+  otp: z.string().length(6, 'Enter the 6-digit OTP'),
+})
+
+const customerSignInSchema = z.object({
+  phone: z.string().min(10, 'Valid phone number is required'),
+  otp: z.string().length(6, 'Enter the 6-digit OTP'),
+})
+
 const signInSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 })
 
 const signUpSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-})
-
-const customerSignUpSchema = z.object({
-  name: z.string().min(2, 'Name is required'),
-  phone: z.string().min(10, 'Valid phone number is required'),
   email: z.string().email(),
   password: z.string().min(8, 'Password must be at least 8 characters'),
 })
@@ -77,22 +106,101 @@ function forgotPasswordHandler(role: 'business' | 'customer') {
   }
 }
 
-router.post('/customer/forgot-password', forgotPasswordHandler('customer'))
 router.post('/business/forgot-password', forgotPasswordHandler('business'))
+
+router.post('/otp/send', async (req, res) => {
+  try {
+    const parsed = otpSendSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(422).json({
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      })
+    }
+
+    const storedPhone = toStoredPhone(parsed.data.phone)
+
+    if (parsed.data.purpose === 'signin') {
+      const existing = await getCustomerByPhone(storedPhone)
+      if (!existing) {
+        return res.status(422).json({ error: 'No account found for this mobile number. Please sign up first.', code: 'PHONE_NOT_FOUND' })
+      }
+    } else {
+      const existing = await getCustomerByPhone(storedPhone)
+      if (existing) {
+        return res.status(409).json({ error: 'An account with this mobile number already exists. Please sign in.' })
+      }
+    }
+
+    await sendOtp(parsed.data.phone)
+    res.json({ success: true, message: 'OTP sent successfully' })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'OTP_SEND_FAILED'
+    if (message === 'INVALID_PHONE') {
+      return res.status(422).json({ error: 'Enter a valid 10-digit Indian mobile number' })
+    }
+    if (message === 'MSG91_NOT_CONFIGURED') {
+      return res.status(503).json({ error: 'OTP service is not configured' })
+    }
+    if (message === 'MSG91_SENDER_ID_MISSING') {
+      return res.status(503).json({
+        error: 'MSG91 Sender ID is not configured. Add MSG91_SENDER_ID to backend .env (find it under MSG91 → SMS → Sender Id).',
+      })
+    }
+    console.error('OTP send error:', err)
+    res.status(500).json({ error: 'Could not send OTP. Please try again.' })
+  }
+})
+
+router.post('/otp/verify', async (req, res) => {
+  try {
+    const parsed = otpVerifySchema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(422).json({
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      })
+    }
+
+    await verifyOtp(parsed.data.phone, parsed.data.otp)
+    res.json({ success: true, message: 'OTP verified' })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'OTP_VERIFY_FAILED'
+    if (message === 'INVALID_PHONE') {
+      return res.status(422).json({ error: 'Enter a valid 10-digit Indian mobile number' })
+    }
+    if (message === 'INVALID_OTP' || message.toLowerCase().includes('otp')) {
+      return res.status(401).json({ error: 'Invalid or expired OTP. Please try again.' })
+    }
+    console.error('OTP verify error:', err)
+    res.status(500).json({ error: 'Could not verify OTP. Please try again.' })
+  }
+})
 
 router.post('/customer/signin', async (req, res) => {
   try {
-    const parsed = signInSchema.safeParse(req.body)
+    const parsed = customerSignInSchema.safeParse(req.body)
     if (!parsed.success) {
-      return res.status(422).json({ error: 'Invalid email or password' })
+      return res.status(422).json({
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      })
     }
 
-    const result = await signInCustomer(parsed.data.email, parsed.data.password)
+    await verifyOtp(parsed.data.phone, parsed.data.otp)
+    const storedPhone = toStoredPhone(parsed.data.phone)
+    const result = await signInCustomerByPhone(storedPhone)
     res.json({ success: true, data: result })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'SIGNIN_FAILED'
-    if (message === 'INVALID_CREDENTIALS') {
-      return res.status(401).json({ error: 'Invalid email or password' })
+    if (message === 'PHONE_NOT_FOUND') {
+      return res.status(404).json({ error: 'No account found for this mobile number. Please sign up first.' })
+    }
+    if (message === 'INVALID_PHONE') {
+      return res.status(422).json({ error: 'Enter a valid 10-digit Indian mobile number' })
+    }
+    if (message.toLowerCase().includes('otp') || message === 'INVALID_OTP') {
+      return res.status(401).json({ error: 'Invalid or expired OTP. Please try again.' })
     }
     console.error('Customer signin error:', err)
     res.status(500).json({ error: 'Sign in failed' })
@@ -109,11 +217,15 @@ router.post('/customer/signup', async (req, res) => {
       })
     }
 
+    await verifyOtp(parsed.data.phone, parsed.data.otp)
+    const storedPhone = toStoredPhone(parsed.data.phone)
+    const email = parsed.data.email?.trim() || null
+
     const user = await createCustomerUser(
       parsed.data.name,
-      parsed.data.phone,
-      parsed.data.email,
-      parsed.data.password,
+      storedPhone,
+      parsed.data.dateOfBirth,
+      email,
     )
     const token = signToken({ ...user, role: 'customer' })
 
@@ -131,7 +243,13 @@ router.post('/customer/signup', async (req, res) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : 'SIGNUP_FAILED'
     if (message === 'EMAIL_OR_PHONE_EXISTS') {
-      return res.status(409).json({ error: 'An account with this email or phone already exists' })
+      return res.status(409).json({ error: 'An account with this mobile number or email already exists' })
+    }
+    if (message === 'INVALID_PHONE') {
+      return res.status(422).json({ error: 'Enter a valid 10-digit Indian mobile number' })
+    }
+    if (message.toLowerCase().includes('otp') || message === 'INVALID_OTP') {
+      return res.status(401).json({ error: 'Invalid or expired OTP. Please try again.' })
     }
     console.error('Customer signup error:', err)
     res.status(500).json({ error: 'Sign up failed' })
