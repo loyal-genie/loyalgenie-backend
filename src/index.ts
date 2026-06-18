@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import { migrate } from './db/migrate.js'
+import { getMsg91SetupStatus } from './services/msg91.js'
 import onboardingRoutes from './routes/onboarding.js'
 import authRoutes from './routes/auth.js'
 import businessRoutes from './routes/business.js'
@@ -83,7 +84,12 @@ app.use(cors({
 app.use(express.json({ limit: '15mb' }))
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'loyalgenie-backend' })
+  const msg91 = getMsg91SetupStatus()
+  res.json({
+    status: 'ok',
+    service: 'loyalgenie-backend',
+    msg91,
+  })
 })
 
 app.use('/api/onboarding', onboardingRoutes)

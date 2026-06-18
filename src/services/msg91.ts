@@ -24,10 +24,25 @@ function getConfig() {
 
 export function isMsg91Configured(): boolean {
   if (process.env.MSG91_DEV_OTP === 'true') return false
-  const { authKey, templateId } = getConfig()
+  const { authKey, templateId, senderId, apiMode } = getConfig()
   if (!authKey || !templateId) return false
   if (authKey.includes('your_auth_key') || templateId.includes('your_template')) return false
+  if (apiMode !== 'widget' && !senderId) return false
   return true
+}
+
+export function getMsg91SetupStatus() {
+  const { authKey, templateId, senderId, apiMode } = getConfig()
+  const missing: string[] = []
+  if (!authKey || authKey.includes('your_auth_key')) missing.push('MSG91_AUTH_KEY')
+  if (!templateId || templateId.includes('your_template')) missing.push('MSG91_OTP_TEMPLATE_ID')
+  if (apiMode !== 'widget' && !senderId) missing.push('MSG91_SENDER_ID')
+  if (process.env.MSG91_DEV_OTP === 'true') missing.push('MSG91_DEV_OTP (disable in production)')
+  return {
+    configured: isMsg91Configured(),
+    apiMode,
+    missing,
+  }
 }
 
 type Msg91Response = { type?: string; message?: string; request_id?: string }

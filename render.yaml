@@ -4,3 +4,28 @@ services:
     runtime: node
     buildCommand: npm install && npm run build
     startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_AUTH_TOKEN
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: MSG91_AUTH_KEY
+        sync: false
+      - key: MSG91_OTP_TEMPLATE_ID
+        sync: false
+      - key: MSG91_SENDER_ID
+        sync: false
+      - key: MSG91_ROUTE
+        value: "4"
+      - key: MSG91_API_MODE
+        value: sms
+      - key: MSG91_OTP_EXPIRY
+        value: "10"
+      - key: MSG91_OTP_LENGTH
+        value: "6"
