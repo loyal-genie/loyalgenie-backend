@@ -47,9 +47,10 @@ async function createVendor() {
 
 async function createCustomer() {
   const id = nanoid()
+  const phone = `91${String(Date.now()).slice(-10)}`
   await db.execute({
     sql: `INSERT INTO customer_users (id, name, phone, email, password_hash) VALUES (?, ?, ?, ?, ?)`,
-    args: [id, 'PIN User', '9198888777', `pin-cust-${RUN_ID}@test.local`, await hashPassword('TestPass123!')],
+    args: [id, 'PIN User', phone, `pin-cust-${RUN_ID}@test.local`, await hashPassword('TestPass123!')],
   })
   return id
 }
@@ -119,7 +120,17 @@ async function main() {
   const v4 = await verifyCampaignPin(campaign.id, afterPoll.pin!, customerId)
   assert('New PIN works after rotation', Boolean(v4.playSessionToken), 'ok')
 
-  // ── Beyond grace: reject ──
+  // ── Hours-stale PIN (staff UI never refreshed) ──
+  const stalePin = '555'
+  const hoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
+  await db.execute({
+    sql: `UPDATE campaigns SET pin = ?, pin_expires_at = ?, previous_pin = NULL, previous_pin_valid_until = NULL WHERE id = ?`,
+    args: [stalePin, hoursAgo, campaign.id],
+  })
+  const vStale = await verifyCampaignPin(campaign.id, stalePin, customerId)
+  assert('Hours-stale PIN accepted after verify-triggered rotation', Boolean(vStale.playSessionToken), 'ok')
+
+  // ── Beyond grace: reject wrong PIN ──
   const staleExpires = new Date(Date.now() - PIN_VERIFY_GRACE_SECONDS * 1000 - 5000).toISOString()
   await db.execute({
     sql: `UPDATE campaigns SET pin = ?, pin_expires_at = ?, previous_pin = NULL, previous_pin_valid_until = NULL WHERE id = ?`,
@@ -127,11 +138,28 @@ async function main() {
   })
 
   try {
-    await verifyCampaignPin(campaign.id, '999', customerId)
-    assert('Stale PIN rejected beyond grace', false, 'should have thrown')
+    await verifyCampaignPin(campaign.id, '000', customerId)
+    assert('Wrong PIN rejected', false, 'should have thrown')
   } catch (err) {
     assert(
-      'Stale PIN rejected beyond grace',
+      'Wrong PIN rejected',
+      err instanceof Error && err.message === 'INVALID_PIN',
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+
+  // ── Previous PIN beyond grace window ──
+  const pastGrace = new Date(Date.now() - 1000).toISOString()
+  await db.execute({
+    sql: `UPDATE campaigns SET pin = '111', pin_expires_at = ?, previous_pin = '222', previous_pin_valid_until = ? WHERE id = ?`,
+    args: [new Date(Date.now() + 120_000).toISOString(), pastGrace, campaign.id],
+  })
+  try {
+    await verifyCampaignPin(campaign.id, '222', customerId)
+    assert('Previous PIN beyond grace rejected', false, 'should have thrown')
+  } catch (err) {
+    assert(
+      'Previous PIN beyond grace rejected',
       err instanceof Error && err.message === 'INVALID_PIN',
       err instanceof Error ? err.message : String(err),
     )

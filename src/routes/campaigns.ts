@@ -207,7 +207,9 @@ router.post('/:id/verify-pin', requireCustomerAuth, async (req, res) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : 'VERIFY_FAILED'
     if (message === 'INVALID_PIN') {
-      return res.status(422).json({ error: 'Wrong PIN. Ask staff for the current PIN.' })
+      return res.status(422).json({
+        error: 'Wrong or expired PIN. Ask staff to check the live PIN on their dashboard.',
+      })
     }
     if (message === 'CAMPAIGN_NOT_ACTIVE') {
       return res.status(403).json({ error: 'Campaign is not active' })

@@ -152,9 +152,9 @@ export function computePinSecondsRemaining(
   return Math.max(0, Math.ceil(ms / 1000))
 }
 
-function pinGraceUntilIso(pinExpiresAt: string | null, now = nowInCampaignTz()): string {
-  const baseMs = pinExpiresAt ? new Date(pinExpiresAt).getTime() : now.getTime()
-  return new Date(baseMs + PIN_VERIFY_GRACE_SECONDS * 1000).toISOString()
+function previousPinGraceUntilIso(now = nowInCampaignTz()): string {
+  // Always grace from rotation/verify time — covers late rotations when staff UI was stale
+  return new Date(now.getTime() + PIN_VERIFY_GRACE_SECONDS * 1000).toISOString()
 }
 
 export interface PinVerificationRow {
@@ -692,8 +692,7 @@ export async function rotatePinIfExpired(campaignId: string) {
 
   if (needsRotation && pinStillNeeded) {
     const oldPin = (current.pin as string | null) ?? null
-    const oldExpires = (current.pin_expires_at as string | null) ?? null
-    const graceUntil = pinGraceUntilIso(oldExpires, now)
+    const graceUntil = previousPinGraceUntilIso(now)
     const pin = generatePin()
     const pinExpires = pinExpiresAtIso(mechanic)
     const updated = await db.execute({
@@ -917,13 +916,15 @@ export async function verifyCampaignPin(campaignId: string, pin: string, custome
     throw new Error('INVALID_PIN')
   }
 
-  const pinRow = await db.execute({
+  const now = nowInCampaignTz()
+
+  let pinRow = await db.execute({
     sql: `SELECT pin, pin_expires_at, previous_pin, previous_pin_valid_until, mechanic,
                  status, start_date, end_date, claim_period_days, cap_filled_at
           FROM campaigns WHERE id = ?`,
     args: [campaignId],
   })
-  const row = pinRow.rows[0]
+  let row = pinRow.rows[0]
   if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
 
   const today = todayInCampaignTz()
@@ -950,6 +951,23 @@ export async function verifyCampaignPin(campaignId: string, pin: string, custome
     }
   }
 
+  const pinExpiresAt = (row.pin_expires_at as string | null) ?? null
+  if (
+    mechanic !== 'stamp' &&
+    pinExpiresAt &&
+    new Date(pinExpiresAt).getTime() <= now.getTime()
+  ) {
+    await rotatePinIfExpired(campaignId)
+    pinRow = await db.execute({
+      sql: `SELECT pin, pin_expires_at, previous_pin, previous_pin_valid_until, mechanic,
+                   status, start_date, end_date, claim_period_days, cap_filled_at
+            FROM campaigns WHERE id = ?`,
+      args: [campaignId],
+    })
+    row = pinRow.rows[0]
+    if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+  }
+
   const pinState: PinVerificationRow = {
     pin: (row.pin as string | null) ?? null,
     pinExpiresAt: (row.pin_expires_at as string | null) ?? null,
@@ -958,17 +976,11 @@ export async function verifyCampaignPin(campaignId: string, pin: string, custome
     mechanic,
   }
 
-  if (!isPinValidForVerify(normalizedPin, pinState)) {
+  if (!isPinValidForVerify(normalizedPin, pinState, now)) {
     throw new Error('INVALID_PIN')
   }
 
   const playSessionToken = signPlaySession(campaignId, customerId)
-
-  const pinExpiresAt = pinState.pinExpiresAt
-  if (pinExpiresAt && new Date(pinExpiresAt).getTime() <= nowInCampaignTz().getTime()) {
-    await rotatePinIfExpired(campaignId)
-  }
-
   return { valid: true, playSessionToken, expiresIn: 300 }
 }
 
