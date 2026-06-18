@@ -46,6 +46,24 @@ export function verifyToken(token: string, expectedRole?: 'business' | 'customer
   }
 }
 
+export function signProfileCompletionToken(phone: string) {
+  return jwt.sign(
+    { sub: phone, type: 'profile_completion' },
+    JWT_SECRET,
+    { expiresIn: '15m' },
+  )
+}
+
+export function verifyProfileCompletionToken(token: string): string | null {
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as { sub: string; type: string }
+    if (payload.type !== 'profile_completion' || !payload.sub) return null
+    return payload.sub
+  } catch {
+    return null
+  }
+}
+
 export async function hashPassword(password: string) {
   return bcrypt.hash(password, 12)
 }
@@ -115,7 +133,7 @@ export async function getCustomerByPhone(phone: string) {
 
   for (const candidate of [...new Set(candidates)]) {
     const result = await db.execute({
-      sql: 'SELECT id, name, phone, email, date_of_birth FROM customer_users WHERE phone = ?',
+      sql: 'SELECT id, name, phone, email, date_of_birth, gender FROM customer_users WHERE phone = ?',
       args: [candidate],
     })
     const row = result.rows[0]
@@ -126,6 +144,7 @@ export async function getCustomerByPhone(phone: string) {
         phone: row.phone as string,
         email: (row.email as string | null) ?? '',
         dateOfBirth: (row.date_of_birth as string | null) ?? undefined,
+        gender: (row.gender as string | null) ?? undefined,
       }
     }
   }
@@ -136,6 +155,7 @@ export async function createCustomerUser(
   name: string,
   phone: string,
   dateOfBirth: string,
+  gender: string,
   email?: string | null,
 ) {
   const normalizedEmail = email?.trim().toLowerCase() || null
@@ -147,9 +167,9 @@ export async function createCustomerUser(
 
   const id = nanoid()
   await db.execute({
-    sql: `INSERT INTO customer_users (id, name, phone, email, password_hash, date_of_birth, phone_verified)
-          VALUES (?, ?, ?, ?, NULL, ?, 1)`,
-    args: [id, name.trim(), phone, normalizedEmail, dateOfBirth],
+    sql: `INSERT INTO customer_users (id, name, phone, email, password_hash, date_of_birth, gender, phone_verified)
+          VALUES (?, ?, ?, ?, NULL, ?, ?, 1)`,
+    args: [id, name.trim(), phone, normalizedEmail, dateOfBirth, gender],
   })
   return {
     id,
@@ -157,6 +177,7 @@ export async function createCustomerUser(
     phone,
     email: normalizedEmail ?? '',
     dateOfBirth,
+    gender,
   }
 }
 

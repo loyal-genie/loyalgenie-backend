@@ -241,6 +241,7 @@ export async function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `)
+  await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
   console.log('Database migrations applied.')
 }
 

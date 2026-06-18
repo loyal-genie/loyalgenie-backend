@@ -5,6 +5,8 @@ import {
   signInBusiness,
   signInCustomerByPhone,
   signToken,
+  signProfileCompletionToken,
+  verifyProfileCompletionToken,
   resetPasswordByEmail,
   verifyToken,
   getCustomerByPhone,
@@ -46,24 +48,21 @@ const phoneSchema = z.object({
   phone: z.string().min(10, 'Valid phone number is required'),
 })
 
-const otpSendSchema = phoneSchema.extend({
-  purpose: z.enum(['signin', 'signup']),
+const otpSendSchema = phoneSchema
+
+const otpLoginSchema = phoneSchema.extend({
+  otp: z.string().length(6, 'Enter the 6-digit OTP'),
+})
+
+const customerCompleteProfileSchema = z.object({
+  profileToken: z.string().min(1),
+  name: z.string().min(2, 'Name is required'),
+  gender: z.enum(['male', 'female', 'other'], { message: 'Gender is required' }),
+  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth is required'),
+  email: z.string().email().optional().or(z.literal('')),
 })
 
 const otpVerifySchema = phoneSchema.extend({
-  otp: z.string().length(6, 'Enter the 6-digit OTP'),
-})
-
-const customerSignUpSchema = z.object({
-  name: z.string().min(2, 'Name is required'),
-  phone: z.string().min(10, 'Valid phone number is required'),
-  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth is required'),
-  email: z.string().email().optional().or(z.literal('')),
-  otp: z.string().length(6, 'Enter the 6-digit OTP'),
-})
-
-const customerSignInSchema = z.object({
-  phone: z.string().min(10, 'Valid phone number is required'),
   otp: z.string().length(6, 'Enter the 6-digit OTP'),
 })
 
@@ -118,20 +117,6 @@ router.post('/otp/send', async (req, res) => {
       })
     }
 
-    const storedPhone = toStoredPhone(parsed.data.phone)
-
-    if (parsed.data.purpose === 'signin') {
-      const existing = await getCustomerByPhone(storedPhone)
-      if (!existing) {
-        return res.status(422).json({ error: 'No account found for this mobile number. Please sign up first.', code: 'PHONE_NOT_FOUND' })
-      }
-    } else {
-      const existing = await getCustomerByPhone(storedPhone)
-      if (existing) {
-        return res.status(409).json({ error: 'An account with this mobile number already exists. Please sign in.' })
-      }
-    }
-
     await sendOtp(parsed.data.phone)
     res.json({ success: true, message: 'OTP sent successfully' })
   } catch (err) {
@@ -177,9 +162,9 @@ router.post('/otp/verify', async (req, res) => {
   }
 })
 
-router.post('/customer/signin', async (req, res) => {
+router.post('/customer/otp-login', async (req, res) => {
   try {
-    const parsed = customerSignInSchema.safeParse(req.body)
+    const parsed = otpLoginSchema.safeParse(req.body)
     if (!parsed.success) {
       return res.status(422).json({
         error: 'Validation failed',
@@ -189,27 +174,37 @@ router.post('/customer/signin', async (req, res) => {
 
     await verifyOtp(parsed.data.phone, parsed.data.otp)
     const storedPhone = toStoredPhone(parsed.data.phone)
-    const result = await signInCustomerByPhone(storedPhone)
-    res.json({ success: true, data: result })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'SIGNIN_FAILED'
-    if (message === 'PHONE_NOT_FOUND') {
-      return res.status(404).json({ error: 'No account found for this mobile number. Please sign up first.' })
+    const existing = await getCustomerByPhone(storedPhone)
+
+    if (existing) {
+      const result = await signInCustomerByPhone(storedPhone)
+      return res.json({ success: true, data: { ...result, isNewUser: false } })
     }
+
+    res.json({
+      success: true,
+      data: {
+        isNewUser: true,
+        profileToken: signProfileCompletionToken(storedPhone),
+        phone: storedPhone,
+      },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'LOGIN_FAILED'
     if (message === 'INVALID_PHONE') {
       return res.status(422).json({ error: 'Enter a valid 10-digit Indian mobile number' })
     }
     if (message.toLowerCase().includes('otp') || message === 'INVALID_OTP') {
       return res.status(401).json({ error: 'Invalid or expired OTP. Please try again.' })
     }
-    console.error('Customer signin error:', err)
-    res.status(500).json({ error: 'Sign in failed' })
+    console.error('Customer OTP login error:', err)
+    res.status(500).json({ error: 'Could not verify OTP. Please try again.' })
   }
 })
 
-router.post('/customer/signup', async (req, res) => {
+router.post('/customer/complete-profile', async (req, res) => {
   try {
-    const parsed = customerSignUpSchema.safeParse(req.body)
+    const parsed = customerCompleteProfileSchema.safeParse(req.body)
     if (!parsed.success) {
       return res.status(422).json({
         error: 'Validation failed',
@@ -217,14 +212,23 @@ router.post('/customer/signup', async (req, res) => {
       })
     }
 
-    await verifyOtp(parsed.data.phone, parsed.data.otp)
-    const storedPhone = toStoredPhone(parsed.data.phone)
-    const email = parsed.data.email?.trim() || null
+    const phone = verifyProfileCompletionToken(parsed.data.profileToken)
+    if (!phone) {
+      return res.status(401).json({ error: 'Session expired. Please verify your mobile number again.' })
+    }
 
+    const existing = await getCustomerByPhone(phone)
+    if (existing) {
+      const result = await signInCustomerByPhone(phone)
+      return res.json({ success: true, data: { ...result, isNewUser: false } })
+    }
+
+    const email = parsed.data.email?.trim() || null
     const user = await createCustomerUser(
       parsed.data.name,
-      storedPhone,
+      phone,
       parsed.data.dateOfBirth,
+      parsed.data.gender,
       email,
     )
     const token = signToken({ ...user, role: 'customer' })
@@ -238,22 +242,45 @@ router.post('/customer/signup', async (req, res) => {
         name: user.name,
         phone: user.phone,
         role: 'customer',
+        isNewUser: true,
       },
     })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'SIGNUP_FAILED'
+    const message = err instanceof Error ? err.message : 'PROFILE_FAILED'
     if (message === 'EMAIL_OR_PHONE_EXISTS') {
       return res.status(409).json({ error: 'An account with this mobile number or email already exists' })
     }
-    if (message === 'INVALID_PHONE') {
-      return res.status(422).json({ error: 'Enter a valid 10-digit Indian mobile number' })
+    console.error('Customer complete profile error:', err)
+    res.status(500).json({ error: 'Could not create account. Please try again.' })
+  }
+})
+
+/** @deprecated alias for /customer/otp-login (existing users only) */
+router.post('/customer/signin', async (req, res) => {
+  try {
+    const parsed = otpLoginSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(422).json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors })
+    }
+    await verifyOtp(parsed.data.phone, parsed.data.otp)
+    const storedPhone = toStoredPhone(parsed.data.phone)
+    const result = await signInCustomerByPhone(storedPhone)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SIGNIN_FAILED'
+    if (message === 'PHONE_NOT_FOUND') {
+      return res.status(404).json({ error: 'No account found for this mobile number.' })
     }
     if (message.toLowerCase().includes('otp') || message === 'INVALID_OTP') {
       return res.status(401).json({ error: 'Invalid or expired OTP. Please try again.' })
     }
-    console.error('Customer signup error:', err)
-    res.status(500).json({ error: 'Sign up failed' })
+    res.status(500).json({ error: 'Sign in failed' })
   }
+})
+
+/** @deprecated use /customer/otp-login + /customer/complete-profile */
+router.post('/customer/signup', async (_req, res) => {
+  res.status(410).json({ error: 'Sign up is now part of sign in. Use mobile OTP on /signin.' })
 })
 
 router.post('/business/signin', async (req, res) => {
