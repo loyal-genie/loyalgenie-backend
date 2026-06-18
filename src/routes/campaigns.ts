@@ -19,6 +19,12 @@ import {
   getStampState,
   executeStampCollect,
 } from '../services/stamp-cards.js'
+import {
+  getLoyaltyState,
+  executeCheckIn,
+  getPendingCheckInPrompt,
+  listCustomerLoyaltyProfiles,
+} from '../services/check-in-loyalty.js'
 
 const router = Router()
 
@@ -44,6 +50,26 @@ router.get('/customer/rewards', requireCustomerAuth, async (req, res) => {
   }
 })
 
+router.get('/customer/loyalty-profile', requireCustomerAuth, async (req, res) => {
+  try {
+    const profiles = await listCustomerLoyaltyProfiles(req.user!.id)
+    res.json({ success: true, data: profiles })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Failed to fetch loyalty profile' })
+  }
+})
+
+router.get('/customer/check-in-prompt', requireCustomerAuth, async (req, res) => {
+  try {
+    const prompt = await getPendingCheckInPrompt(req.user!.id)
+    res.json({ success: true, data: prompt })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Failed to fetch check-in prompt' })
+  }
+})
+
 // ── Vendor (business) ─────────────────────────────────────────────────────────
 
 router.get('/', requireAuth, async (req, res) => {
@@ -64,9 +90,14 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     const parsed = createCampaignSchema.safeParse(req.body)
     if (!parsed.success) {
+      const flat = parsed.error.flatten()
+      const mechanicErr = flat.fieldErrors.mechanic?.[0]
+      const message = mechanicErr?.includes('discriminator') || mechanicErr?.includes('Invalid enum')
+        ? 'Campaign type not supported by the running API. Rebuild and restart the backend (npm run build && npm start).'
+        : 'Validation failed'
       return res.status(422).json({
-        error: 'Validation failed',
-        details: parsed.error.flatten().fieldErrors,
+        error: message,
+        details: flat.fieldErrors,
       })
     }
     const campaign = await createCampaign(req.user!.id, parsed.data)
@@ -79,8 +110,8 @@ router.post('/', requireAuth, async (req, res) => {
     if (message === 'REWARD_SHARES_MUST_SUM_100') {
       return res.status(422).json({ error: 'Reward shares must sum to exactly 100%' })
     }
-    if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL') {
-      return res.status(422).json({ error: 'Invalid stamp card configuration' })
+    if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL' || message === 'INVALID_LOYALTY_MILESTONES') {
+      return res.status(422).json({ error: message === 'INVALID_LOYALTY_MILESTONES' ? 'Milestone point thresholds must be unique' : 'Invalid stamp card configuration' })
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to create campaign' })
@@ -270,6 +301,47 @@ router.post('/:id/stamp', requireCustomerAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to collect stamp' })
+  }
+})
+
+router.get('/:id/loyalty-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getLoyaltyState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_LOYALTY_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get loyalty state' })
+  }
+})
+
+router.post('/:id/check-in', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await executeCheckIn(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CHECK_IN_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'Campaign is full' })
+    }
+    if (message === 'ALREADY_CHECKED_IN_TODAY') {
+      return res.status(403).json({ error: 'You already checked in today' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to check in' })
   }
 })
 

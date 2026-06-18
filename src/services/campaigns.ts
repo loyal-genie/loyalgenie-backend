@@ -22,6 +22,12 @@ import {
   type StampCampaignStats,
 } from './stamp-cards.js'
 import { createStampCampaignSchema, type CreateStampCampaignPayload } from './stamp-campaign-schema.js'
+import {
+  createCheckInLoyaltyCampaignSchema,
+  validateMilestones,
+  type CreateCheckInLoyaltyCampaignPayload,
+} from './check-in-loyalty-schema.js'
+import { getLoyaltyCampaignStats, type LoyaltyCampaignStats } from './check-in-loyalty.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 export const PIN_CYCLE_SECONDS = 120
@@ -49,6 +55,7 @@ export const createShakeCampaignSchema = z.object({
 export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createShakeCampaignSchema,
   createStampCampaignSchema,
+  createCheckInLoyaltyCampaignSchema,
 ])
 
 export type CreateCampaignPayload = z.infer<typeof createCampaignSchema>
@@ -104,6 +111,7 @@ export interface CampaignRow {
   rewardsClaimed: number
   redeemedCount: number
   stampStats?: StampCampaignStats | null
+  loyaltyStats?: LoyaltyCampaignStats | null
 }
 
 export type PlayBlockReason =
@@ -130,7 +138,8 @@ function pinExpiresAtIso(mechanic = 'shake'): string {
 }
 
 export function pinCycleSecondsForMechanic(mechanic: string): number {
-  return mechanic === 'stamp' ? PIN_CYCLE_STAMP_SECONDS : PIN_CYCLE_SECONDS
+  if (mechanic === 'stamp') return PIN_CYCLE_STAMP_SECONDS
+  return PIN_CYCLE_SECONDS
 }
 
 async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
@@ -261,6 +270,9 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'stamp') {
     base.stampStats = await getStampCampaignStats(id)
   }
+  if (mechanic === 'check-in-loyalty') {
+    base.loyaltyStats = await getLoyaltyCampaignStats(id)
+  }
   return base
 }
 
@@ -374,9 +386,53 @@ async function createStampCampaign(userId: string, payload: CreateStampCampaignP
   return await rowToCampaign(result.rows[0] as Record<string, unknown>)
 }
 
+async function createCheckInLoyaltyCampaignHandler(userId: string, payload: CreateCheckInLoyaltyCampaignPayload) {
+  validateMilestones(payload.milestones)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('check-in-loyalty')
+  const configJson = JSON.stringify({
+    type: 'check-in-loyalty',
+    checkInConfig: payload.checkInConfig,
+  })
+
+  const rewardStatements = payload.milestones.map((m, i) => ({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'milestone')`,
+    args: [nanoid(), campaignId, m.name, m.description ?? '', m.icon, m.pointsThreshold, i],
+  }))
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        config_json, pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'check-in-loyalty', 'active', ?, ?, ?, 0, 1, 0, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    ...rewardStatements,
+  ])
+
+  const result = await db.execute({
+    sql: 'SELECT * FROM campaigns WHERE id = ?',
+    args: [campaignId],
+  })
+  return await rowToCampaign(result.rows[0] as Record<string, unknown>)
+}
+
 export async function createCampaign(userId: string, payload: CreateCampaignPayload) {
   if (payload.mechanic === 'stamp') {
     return createStampCampaign(userId, payload)
+  }
+  if (payload.mechanic === 'check-in-loyalty') {
+    return createCheckInLoyaltyCampaignHandler(userId, payload)
   }
   return createShakeCampaign(userId, payload)
 }
@@ -610,6 +666,11 @@ export async function listBusinessesWithActiveCampaigns() {
             today,
           )
         }
+        if (mechanic === 'check-in-loyalty') {
+          const endDate = c.end_date as string
+          const startDate = c.start_date as string
+          return today >= startDate && today <= endDate
+        }
         const endDate = c.end_date as string
         return today <= endDate
       })
@@ -674,6 +735,35 @@ export async function getPublicCampaign(campaignId: string) {
         description: r.description,
         icon: r.icon,
         tier: r.rewardTier,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'check-in-loyalty') {
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    if (today < campaign.startDate || today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    const { parseCheckInConfig } = await import('./check-in-loyalty.js')
+    const checkInConfig = parseCheckInConfig(campaign.configJson)
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      checkInConfig,
+      rewards: campaign.rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+        pointsThreshold: r.sharePercent,
       })),
     }
   }

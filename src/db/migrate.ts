@@ -189,6 +189,32 @@ CREATE TABLE IF NOT EXISTS stamp_cards (
 );
 
 CREATE INDEX IF NOT EXISTS idx_stamp_cards_campaign ON stamp_cards(campaign_id, status);
+
+CREATE TABLE IF NOT EXISTS loyalty_cards (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  loyalty_points INTEGER NOT NULL DEFAULT 0,
+  total_check_ins INTEGER NOT NULL DEFAULT 0,
+  last_check_in_date TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  enrolled_at TEXT NOT NULL,
+  UNIQUE(campaign_id, customer_id),
+  FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+);
+
+CREATE TABLE IF NOT EXISTS loyalty_milestone_awards (
+  id TEXT PRIMARY KEY,
+  loyalty_card_id TEXT NOT NULL,
+  reward_id TEXT NOT NULL,
+  play_id TEXT NOT NULL,
+  awarded_at TEXT NOT NULL,
+  UNIQUE(loyalty_card_id, reward_id),
+  FOREIGN KEY (loyalty_card_id) REFERENCES loyalty_cards(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_loyalty_cards_campaign ON loyalty_cards(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_loyalty_cards_customer ON loyalty_cards(customer_id);
 `
 
 async function runOptional(sql: string) {

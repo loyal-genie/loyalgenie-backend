@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "sh -c 'if command -v tsx >/dev/null 2>&1; then exec tsx watch src/index.ts; else exec node dist/index.js; fi'",
+    "prestart": "npm run build",
     "start": "node dist/index.js",
     "build": "tsc",
     "db:migrate": "tsx src/db/migrate.ts",
@@ -14,7 +15,8 @@
     "test:stamp:frontend": "tsx scripts/test-stamp-frontend-flow.ts",
     "test:stamp:manual": "bash scripts/test-stamp-manual-user.sh",
     "sim:stamp:10d": "tsx scripts/sim-stamp-10-days.ts",
-    "test:shake:e2e": "tsx scripts/test-shake-e2e-10-users.ts"
+    "test:shake:e2e": "tsx scripts/test-shake-e2e-10-users.ts",
+    "test:loyalty:e2e": "tsx scripts/test-check-in-loyalty-e2e.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
