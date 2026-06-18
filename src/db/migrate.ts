@@ -165,6 +165,8 @@ const COLUMN_PATCHES_CAMPAIGNS = [
   'ALTER TABLE campaigns ADD COLUMN cap_filled_at TEXT',
   'ALTER TABLE campaigns ADD COLUMN claim_period_days INTEGER NOT NULL DEFAULT 30',
   'ALTER TABLE campaign_rewards ADD COLUMN reward_tier TEXT',
+  'ALTER TABLE campaigns ADD COLUMN previous_pin TEXT',
+  'ALTER TABLE campaigns ADD COLUMN previous_pin_valid_until TEXT',
 ]
 
 const STAMP_CARD_MIGRATIONS = `

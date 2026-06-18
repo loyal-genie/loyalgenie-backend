@@ -216,24 +216,24 @@ async function runPinDeepTests(
     `status=${sessionRes.status}`,
   )
 
-  // Grace: PIN expired 30s ago but within 45s grace
+  // Grace: PIN expired 30s ago but within 120s grace
   const gracePin = meta.pin
   await setPinExpiresAt(campaignId, new Date(Date.now() - 30_000).toISOString())
   const graceCustomer = await signupCustomer(901)
   const graceRes = await verifyPin(graceCustomer.token, campaignId, gracePin)
   assert(
-    'PIN expired 30s ago still accepted (45s grace)',
+    'PIN expired 30s ago still accepted (120s grace)',
     graceRes.status === 200,
     `status=${graceRes.status} error=${graceRes.json.error}`,
   )
 
-  // Beyond grace: expired 60s ago → reject and rotate
+  // Beyond grace: expired 130s ago → reject and rotate
   const stalePin = (await readDbPin(campaignId)).pin!
-  await setPinExpiresAt(campaignId, new Date(Date.now() - 60_000).toISOString())
+  await setPinExpiresAt(campaignId, new Date(Date.now() - 130_000).toISOString())
   const staleCustomer = await signupCustomer(902)
   const staleRes = await verifyPin(staleCustomer.token, campaignId, stalePin)
   assert(
-    'PIN expired 60s ago rejected (beyond grace)',
+    'PIN expired 130s ago rejected (beyond grace)',
     staleRes.status === 422,
     `status=${staleRes.status} error=${staleRes.json.error}`,
   )

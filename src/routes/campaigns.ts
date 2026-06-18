@@ -11,6 +11,7 @@ import {
   listBusinessesWithActiveCampaigns,
   getPublicCampaign,
   verifyCampaignPin,
+  normalizePin,
   getPlayState,
   executeShakePlay,
   listCustomerRewards,
@@ -197,11 +198,11 @@ router.patch('/:id', requireAuth, async (req, res) => {
 
 router.post('/:id/verify-pin', requireCustomerAuth, async (req, res) => {
   try {
-    const pin = String(req.body?.pin ?? '')
-    if (!/^\d{3}$/.test(pin)) {
+    const normalizedPin = normalizePin(String(req.body?.pin ?? ''))
+    if (!/^\d{3}$/.test(normalizedPin)) {
       return res.status(422).json({ error: 'PIN must be 3 digits' })
     }
-    const result = await verifyCampaignPin(String(req.params.id), pin, req.user!.id)
+    const result = await verifyCampaignPin(String(req.params.id), normalizedPin, req.user!.id)
     res.json({ success: true, data: result })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'VERIFY_FAILED'
