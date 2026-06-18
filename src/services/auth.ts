@@ -85,12 +85,28 @@ export async function createBusinessUser(email: string, password: string) {
   return { id, email: email.toLowerCase() }
 }
 
-export async function signInBusiness(email: string, password: string) {
-  const result = await db.execute({
+/** Login/reset email may match business_users.email or businesses.email on the linked account. */
+async function resolveBusinessUserByEmail(email: string) {
+  const normalized = email.toLowerCase()
+  const direct = await db.execute({
     sql: 'SELECT id, email, password_hash FROM business_users WHERE email = ?',
-    args: [email.toLowerCase()],
+    args: [normalized],
   })
-  const row = result.rows[0]
+  if (direct.rows[0]) return direct.rows[0]
+
+  const viaBusiness = await db.execute({
+    sql: `SELECT bu.id, bu.email, bu.password_hash
+          FROM businesses b
+          JOIN business_users bu ON bu.id = b.user_id
+          WHERE lower(b.email) = ?
+          LIMIT 1`,
+    args: [normalized],
+  })
+  return viaBusiness.rows[0] ?? null
+}
+
+export async function signInBusiness(email: string, password: string) {
+  const row = await resolveBusinessUserByEmail(email)
   if (!row) throw new Error('INVALID_CREDENTIALS')
 
   const valid = await verifyPassword(password, row.password_hash as string)
@@ -202,9 +218,20 @@ export async function resetPasswordByEmail(
   email: string,
   newPassword: string,
 ) {
-  const table = role === 'customer' ? 'customer_users' : 'business_users'
+  if (role === 'business') {
+    const row = await resolveBusinessUserByEmail(email)
+    if (!row) throw new Error('EMAIL_NOT_FOUND')
+
+    const passwordHash = await hashPassword(newPassword)
+    await db.execute({
+      sql: 'UPDATE business_users SET password_hash = ? WHERE id = ?',
+      args: [passwordHash, row.id as string],
+    })
+    return
+  }
+
   const result = await db.execute({
-    sql: `SELECT id FROM ${table} WHERE email = ?`,
+    sql: 'SELECT id FROM customer_users WHERE email = ?',
     args: [email.toLowerCase()],
   })
   const row = result.rows[0]
@@ -212,7 +239,7 @@ export async function resetPasswordByEmail(
 
   const passwordHash = await hashPassword(newPassword)
   await db.execute({
-    sql: `UPDATE ${table} SET password_hash = ? WHERE id = ?`,
+    sql: 'UPDATE customer_users SET password_hash = ? WHERE id = ?',
     args: [passwordHash, row.id as string],
   })
 }
