@@ -14,14 +14,17 @@ import {
   isStampCampaignActive,
   isPinActiveForStamp,
   parseStampCampaignMeta,
+  parseStampConfig,
   getClaimDeadline,
   getStampCampaignStats,
   type StampCampaignStats,
 } from './stamp-cards.js'
-import { createStampCampaignSchema, type CreateStampCampaignPayload } from './stamp-campaign-schema.js'
+import { createStampCampaignSchema, stampConfigSchema, type CreateStampCampaignPayload } from './stamp-campaign-schema.js'
 import {
   createCheckInLoyaltyCampaignSchema,
   validateMilestones,
+  loyaltyMilestoneSchema,
+  checkInLoyaltyConfigSchema,
   type CreateCheckInLoyaltyCampaignPayload,
 } from './check-in-loyalty-schema.js'
 import { getLoyaltyCampaignStats, type LoyaltyCampaignStats } from './check-in-loyalty.js'
@@ -68,6 +71,18 @@ const updateRewardSchema = rewardSchema.extend({
   id: z.string().optional(),
 })
 
+const stampRewardEntrySchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1),
+  description: z.string().optional().default(''),
+  icon: z.string().min(1).default('🎁'),
+  winPercent: z.number().int().min(1).max(100),
+})
+
+const updateLoyaltyMilestoneSchema = loyaltyMilestoneSchema.extend({
+  id: z.string().optional(),
+})
+
 export const updateCampaignSchema = z.object({
   name: z.string().min(1).optional(),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -76,10 +91,52 @@ export const updateCampaignSchema = z.object({
   perDayUserLimit: z.number().int().min(1).optional(),
   winRatePercent: z.number().int().min(1).max(100).optional(),
   status: z.enum(['active', 'paused', 'ended']).optional(),
-  rewards: z.array(updateRewardSchema).min(1).optional(),
+  rewards: z.union([
+    z.array(updateRewardSchema).min(1),
+    z.object({
+      surprise: z.array(stampRewardEntrySchema).min(1),
+      big: z.array(stampRewardEntrySchema).min(1),
+    }),
+  ]).optional(),
+  claimPeriodDays: z.number().int().min(1).max(365).optional(),
+  stampConfig: stampConfigSchema.optional(),
+  checkInConfig: checkInLoyaltyConfigSchema.optional(),
+  milestones: z.array(updateLoyaltyMilestoneSchema).min(1).optional(),
 })
 
-export type UpdateCampaignPayload = z.infer<typeof updateCampaignSchema>
+export interface UpdateCampaignPayload {
+  name?: string
+  endDate?: string
+  userCap?: number
+  playsPerDay?: number
+  perDayUserLimit?: number
+  winRatePercent?: number
+  status?: 'active' | 'paused' | 'ended'
+  rewards?:
+    | { id?: string; name: string; description?: string; icon: string; sharePercent: number }[]
+    | StampTierRewards
+  claimPeriodDays?: number
+  stampConfig?: z.infer<typeof stampConfigSchema>
+  checkInConfig?: z.infer<typeof checkInLoyaltyConfigSchema>
+  milestones?: { id?: string; name: string; description?: string; icon: string; pointsThreshold: number }[]
+}
+
+type StampTierRewards = {
+  surprise: { id?: string; name: string; description?: string; icon: string; winPercent: number }[]
+  big: { id?: string; name: string; description?: string; icon: string; winPercent: number }[]
+}
+
+function isShakeRewardsUpdate(
+  rewards: UpdateCampaignPayload['rewards'],
+): rewards is { id?: string; name: string; description?: string; icon: string; sharePercent: number }[] {
+  return Array.isArray(rewards)
+}
+
+function isStampRewardsUpdate(
+  rewards: UpdateCampaignPayload['rewards'],
+): rewards is StampTierRewards {
+  return rewards !== undefined && !Array.isArray(rewards)
+}
 
 export interface CampaignReward {
   id: string
@@ -534,15 +591,29 @@ export async function updateCampaign(
     throw new Error('END_DATE_BEFORE_START')
   }
 
-  if (payload.rewards !== undefined) {
+  if (payload.status === 'active' && existing.status === 'ended') {
+    throw new Error('CANNOT_REACTIVATE_ENDED')
+  }
+
+  if (existing.mechanic === 'stamp') {
+    return updateStampCampaign(userId, existing, payload)
+  }
+  if (existing.mechanic === 'check-in-loyalty') {
+    return updateLoyaltyCampaign(userId, existing, payload)
+  }
+  return updateShakeCampaign(userId, existing, payload)
+}
+
+async function updateShakeCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (payload.rewards !== undefined && isShakeRewardsUpdate(payload.rewards)) {
     const shareTotal = payload.rewards.reduce((s, r) => s + r.sharePercent, 0)
     if (shareTotal !== 100) {
       throw new Error('REWARD_SHARES_MUST_SUM_100')
     }
-  }
-
-  if (payload.status === 'active' && existing.status === 'ended') {
-    throw new Error('CANNOT_REACTIVATE_ENDED')
   }
 
   const fields: string[] = []
@@ -582,30 +653,221 @@ export async function updateCampaign(
   }
 
   if (fields.length > 0) {
-    args.push(campaignId, existing.businessId)
+    args.push(existing.id, existing.businessId)
     await db.execute({
       sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
       args,
     })
   }
 
-  if (payload.rewards !== undefined) {
+  if (payload.rewards !== undefined && isShakeRewardsUpdate(payload.rewards)) {
+    await replaceShakeRewards(existing.id, existing.rewards, payload.rewards)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceShakeRewards(
+  campaignId: string,
+  existingRewards: CampaignReward[],
+  rewards: { id?: string; name: string; description?: string; icon: string; sharePercent: number }[],
+) {
+  const existingIds = new Set(existingRewards.map(r => r.id))
+  const statements = [
+    {
+      sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
+      args: [campaignId],
+    },
+    ...rewards.map((r, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        r.id && existingIds.has(r.id) ? r.id : nanoid(),
+        campaignId,
+        r.name,
+        r.description ?? '',
+        r.icon,
+        r.sharePercent,
+        i,
+      ],
+    })),
+  ]
+  await db.batch(statements)
+}
+
+async function updateStampCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  const stampConfig = payload.stampConfig
+  if (stampConfig) {
+    validateStampConfig(stampConfig)
+  }
+
+  if (payload.rewards !== undefined && isStampRewardsUpdate(payload.rewards)) {
+    const config = stampConfig ?? parseStampConfig(existing.configJson)
+    if (!config) throw new Error('INVALID_STAMP_CONFIG')
+
+    for (const tier of ['surprise', 'big'] as const) {
+      const mode = config[`${tier}Mode`]
+      const entries = payload.rewards[tier]
+      if (mode === 'single' && entries.length < 1) {
+        throw new Error('INVALID_STAMP_REWARDS')
+      }
+      if (mode === 'pool') {
+        const total = entries.reduce((s, r) => s + r.winPercent, 0)
+        if (total > 100 || total < 1) {
+          throw new Error('INVALID_STAMP_POOL')
+        }
+      }
+    }
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?')
+    args.push(payload.userCap)
+  }
+  if (payload.claimPeriodDays !== undefined) {
+    fields.push('claim_period_days = ?')
+    args.push(payload.claimPeriodDays)
+  }
+  if (payload.status !== undefined) {
+    fields.push('status = ?')
+    args.push(payload.status)
+  }
+  if (stampConfig) {
+    fields.push('config_json = ?')
+    args.push(JSON.stringify({ type: 'stamp', stampConfig }))
+  }
+
+  if (fields.length === 0 && payload.rewards === undefined) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.rewards !== undefined && isStampRewardsUpdate(payload.rewards)) {
+    const config = stampConfig ?? parseStampConfig(existing.configJson)
+    if (!config) throw new Error('INVALID_STAMP_CONFIG')
+
+    const stampRewards = payload.rewards
+
+    const existingByTier = {
+      surprise: existing.rewards.filter(r => r.rewardTier === 'surprise'),
+      big: existing.rewards.filter(r => r.rewardTier === 'big'),
+    }
+
+    const statements: { sql: string; args: (string | number | null)[] }[] = [
+      { sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [existing.id] },
+    ]
+
+    let sortOrder = 0
+    for (const tier of ['surprise', 'big'] as const) {
+      for (const r of stampRewards[tier]) {
+        const tierExisting = existingByTier[tier]
+        const matchedId = r.id && tierExisting.some(x => x.id === r.id)
+          ? r.id
+          : tierExisting.shift()?.id ?? nanoid()
+        statements.push({
+          sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            matchedId!,
+            existing.id,
+            r.name,
+            r.description ?? '',
+            r.icon,
+            config[`${tier}Mode`] === 'single' ? 100 : r.winPercent,
+            sortOrder++,
+            tier,
+          ],
+        })
+      }
+    }
+    await db.batch(statements)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function updateLoyaltyCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (payload.milestones !== undefined) {
+    validateMilestones(payload.milestones)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?')
+    args.push(payload.userCap)
+  }
+  if (payload.status !== undefined) {
+    fields.push('status = ?')
+    args.push(payload.status)
+  }
+  if (payload.checkInConfig !== undefined) {
+    fields.push('config_json = ?')
+    args.push(JSON.stringify({ type: 'check-in-loyalty', checkInConfig: payload.checkInConfig }))
+  }
+
+  if (fields.length === 0 && payload.milestones === undefined) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.milestones !== undefined) {
+    const milestones = payload.milestones
     const existingIds = new Set(existing.rewards.map(r => r.id))
     const statements = [
-      {
-        sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
-        args: [campaignId],
-      },
-      ...payload.rewards.map((r, i) => ({
-        sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order)
-              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      { sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [existing.id] },
+      ...milestones.map((m, i) => ({
+        sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'milestone')`,
         args: [
-          r.id && existingIds.has(r.id) ? r.id : nanoid(),
-          campaignId,
-          r.name,
-          r.description ?? '',
-          r.icon,
-          r.sharePercent,
+          m.id && existingIds.has(m.id) ? m.id : nanoid(),
+          existing.id,
+          m.name,
+          m.description ?? '',
+          m.icon,
+          m.pointsThreshold,
           i,
         ],
       })),
@@ -613,7 +875,7 @@ export async function updateCampaign(
     await db.batch(statements)
   }
 
-  return getCampaignForBusiness(userId, campaignId)
+  return getCampaignForBusiness(userId, existing.id)
 }
 
 export async function getCampaignForBusiness(userId: string, campaignId: string) {

@@ -13,6 +13,7 @@ import {
   verifyCampaignPin,
   normalizePin,
   getPlayState,
+  type UpdateCampaignPayload,
   executeShakePlay,
   listCustomerRewards,
 } from '../services/campaigns.js'
@@ -170,7 +171,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
         details: parsed.error.flatten().fieldErrors,
       })
     }
-    const campaign = await updateCampaign(req.user!.id, String(req.params.id), parsed.data)
+    const campaign = await updateCampaign(req.user!.id, String(req.params.id), parsed.data as UpdateCampaignPayload)
     res.json({ success: true, data: campaign })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'UPDATE_FAILED'
@@ -188,6 +189,12 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
     if (message === 'REWARD_SHARES_MUST_SUM_100') {
       return res.status(422).json({ error: 'Reward shares must sum to exactly 100%' })
+    }
+    if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL') {
+      return res.status(422).json({ error: 'Invalid stamp card configuration' })
+    }
+    if (message === 'INVALID_LOYALTY_MILESTONES') {
+      return res.status(422).json({ error: 'Milestone point thresholds must be unique' })
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to update campaign' })
