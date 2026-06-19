@@ -7,6 +7,7 @@ import onboardingRoutes from './routes/onboarding.js'
 import authRoutes from './routes/auth.js'
 import businessRoutes from './routes/business.js'
 import campaignRoutes from './routes/campaigns.js'
+import { normalizeFrontendOrigin, parseFrontendOrigins } from './utils/frontend-url.js'
 
 dotenv.config()
 
@@ -14,22 +15,28 @@ const app = express()
 const PORT = Number(process.env.PORT ?? 4000)
 
 function normalizeOrigin(raw: string): string {
-  const trimmed = raw.trim().replace(/\/+$/, '')
-  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
-  try {
-    return new URL(withProtocol).origin
-  } catch {
-    return trimmed
-  }
+  return normalizeFrontendOrigin(raw)
 }
 
 function buildAllowedOrigins(): string[] {
-  const fromEnv = (process.env.FRONTEND_URL ?? 'http://localhost:5173')
-    .split(',')
-    .map(normalizeOrigin)
-    .filter(Boolean)
+  const fromEnv = parseFrontendOrigins()
+
+  const expanded = [...fromEnv]
+  for (const origin of fromEnv) {
+    try {
+      const { protocol, hostname } = new URL(origin)
+      if (hostname.startsWith('www.')) {
+        expanded.push(`${protocol}//${hostname.slice(4)}`)
+      } else if (!hostname.includes('localhost') && hostname.includes('.')) {
+        expanded.push(`${protocol}//www.${hostname}`)
+      }
+    } catch {
+      /* ignore invalid URL */
+    }
+  }
+
   return [...new Set([
-    ...fromEnv,
+    ...expanded,
     normalizeOrigin('http://localhost:5173'),
     normalizeOrigin('http://localhost:3000'),
     normalizeOrigin('http://localhost:3001'),

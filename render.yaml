@@ -14,7 +14,7 @@ services:
       - key: JWT_SECRET
         sync: false
       - key: FRONTEND_URL
-        sync: false
+        value: https://www.loyalgenie.in
       - key: MSG91_AUTH_KEY
         sync: false
       - key: MSG91_OTP_TEMPLATE_ID

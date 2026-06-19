@@ -13,6 +13,7 @@ import {
   listPendingRedemptions,
   markRedemptionRedeemed,
 } from '../services/vendor-analytics.js'
+import { getPrimaryFrontendUrl } from '../utils/frontend-url.js'
 
 const router = Router()
 
@@ -53,7 +54,7 @@ router.patch('/me', requireAuth, async (req, res) => {
 
 router.get('/me/qr', requireAuth, async (req, res) => {
   try {
-    const frontendBaseUrl = process.env.FRONTEND_URL ?? 'http://localhost:5173'
+    const frontendBaseUrl = getPrimaryFrontendUrl()
     const qr = await getBusinessQrForUser(req.user!.id, frontendBaseUrl)
     res.json({ success: true, data: qr })
   } catch (err) {
