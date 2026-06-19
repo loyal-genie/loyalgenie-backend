@@ -19,6 +19,7 @@ export interface VendorCustomerSummary {
   gamesPlayed: number
   rewardsEarned: number
   redeemedCount: number
+  totalLoyaltyPoints: number
   status: 'active' | 'inactive'
 }
 
@@ -109,6 +110,7 @@ function mapCustomerRow(row: Record<string, unknown>): VendorCustomerSummary {
     gamesPlayed: Number(row.games_played ?? 0),
     rewardsEarned: Number(row.rewards_earned ?? 0),
     redeemedCount: Number(row.redeemed_count ?? 0),
+    totalLoyaltyPoints: Number(row.total_loyalty_points ?? 0),
     status: daysSinceVisit <= 45 ? 'active' : 'inactive',
   }
 }
@@ -170,14 +172,20 @@ async function fetchCustomerSummaries(businessId: string): Promise<VendorCustome
           FROM customer_rewards cr2
           INNER JOIN campaigns c2 ON c2.id = cr2.campaign_id AND c2.business_id = ?
           WHERE cr2.customer_id = cu.id AND cr2.status = 'redeemed'
-        ) AS redeemed_count
+        ) AS redeemed_count,
+        (
+          SELECT COALESCE(SUM(lc.loyalty_points), 0)
+          FROM loyalty_cards lc
+          INNER JOIN campaigns c3 ON c3.id = lc.campaign_id AND c3.business_id = ?
+          WHERE lc.customer_id = cu.id
+        ) AS total_loyalty_points
       FROM game_plays gp
       INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
       INNER JOIN customer_users cu ON cu.id = gp.customer_id
       GROUP BY cu.id
       ORDER BY last_visit DESC
     `,
-    args: [businessId, businessId],
+    args: [businessId, businessId, businessId],
   })
 
   return result.rows.map(row => mapCustomerRow(row as Record<string, unknown>))
