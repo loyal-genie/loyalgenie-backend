@@ -7,16 +7,13 @@ import { rollWinWithDailyQuota } from './daily-win-quota.js'
 import {
   todayInCampaignTz,
   istDateSql,
-  nextMidnightIsoInCampaignTz,
   nowInCampaignTz,
 } from '../utils/campaign-dates.js'
 import {
   validateStampConfig,
-  PIN_CYCLE_STAMP_SECONDS,
   isStampCampaignActive,
   isPinActiveForStamp,
   parseStampCampaignMeta,
-  stampPinGraceExpired,
   getClaimDeadline,
   getStampCampaignStats,
   type StampCampaignStats,
@@ -173,11 +170,6 @@ export function isPinValidForVerify(
   const normalized = normalizePin(entered)
   if (!/^\d{3}$/.test(normalized)) return false
 
-  if (row.mechanic === 'stamp') {
-    const storedPin = row.pin ? normalizePin(String(row.pin)) : null
-    return storedPin === normalized && !stampPinGraceExpired(row.pinExpiresAt)
-  }
-
   return isShakeLikePinValid(
     normalized,
     row.pin,
@@ -210,15 +202,11 @@ function isShakeLikePinValid(
   return false
 }
 
-function pinExpiresAtIso(mechanic = 'shake'): string {
-  if (mechanic === 'stamp') {
-    return nextMidnightIsoInCampaignTz(nowInCampaignTz())
-  }
+function pinExpiresAtIso(_mechanic = 'shake'): string {
   return new Date(nowInCampaignTz().getTime() + PIN_CYCLE_SECONDS * 1000).toISOString()
 }
 
-export function pinCycleSecondsForMechanic(mechanic: string): number {
-  if (mechanic === 'stamp') return PIN_CYCLE_STAMP_SECONDS
+export function pinCycleSecondsForMechanic(_mechanic: string): number {
   return PIN_CYCLE_SECONDS
 }
 
@@ -678,7 +666,13 @@ export async function rotatePinIfExpired(campaignId: string) {
   const expiresAt = current.pin_expires_at as string | null
   const now = nowInCampaignTz()
   const nowIso = now.toISOString()
-  const needsRotation = !expiresAt || new Date(expiresAt).getTime() <= now.getTime()
+  const maxPinWindowMs = (PIN_CYCLE_SECONDS + PIN_VERIFY_GRACE_SECONDS) * 1000
+  const pinWindowTooLong = Boolean(
+    expiresAt && new Date(expiresAt).getTime() - now.getTime() > maxPinWindowMs,
+  )
+  const needsRotation = !expiresAt
+    || new Date(expiresAt).getTime() <= now.getTime()
+    || pinWindowTooLong
 
   const pinStillNeeded = mechanic === 'stamp'
     ? isPinActiveForStamp(

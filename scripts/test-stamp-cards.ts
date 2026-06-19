@@ -125,7 +125,6 @@ async function runCampaignSimulation() {
   })
 
   assert('Campaign created', campaign.mechanic === 'stamp', `id=${campaign.id}`)
-  assert('Daily PIN cycle', true, 'stamp uses midnight rotation')
 
   const customers = await Promise.all(
     Array.from({ length: userCap }, (_, i) => createCustomer(i + 1)),
@@ -133,6 +132,7 @@ async function runCampaignSimulation() {
 
   const pinData = await getCampaignPinForBusiness(vendor.userId, campaign.id)
   const pin = pinData.pin!
+  assert('PIN cycle is 120s', pinData.cycleSeconds === 120, `cycleSeconds=${pinData.cycleSeconds}`)
   assert('PIN generated', /^\d{3}$/.test(pin), `pin=${pin}`)
 
   // Enroll all 10 users on day 1 with first stamp

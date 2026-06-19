@@ -24,9 +24,6 @@ export {
   type StampConfig,
 } from './stamp-campaign-schema.js'
 
-export const PIN_CYCLE_STAMP_SECONDS = 86400
-const STAMP_PIN_GRACE_MINUTES = 30
-
 export interface StampCardRow {
   id: string
   campaignId: string
@@ -566,12 +563,6 @@ async function applyTriggerResults(
   }
 
   return applied
-}
-
-export function stampPinGraceExpired(pinExpiresAt: string | null): boolean {
-  if (!pinExpiresAt) return false
-  const graceMs = STAMP_PIN_GRACE_MINUTES * 60 * 1000
-  return nowInCampaignTz().getTime() > new Date(pinExpiresAt).getTime() + graceMs
 }
 
 export interface StampCampaignStats {
