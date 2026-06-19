@@ -1,4 +1,4 @@
-import { generateOtp, saveOtp, verifyStoredOtp } from './otp-store.js'
+import { generateOtp, saveOtp, saveEmailOtp, verifyStoredOtp, verifyStoredEmailOtp } from './otp-store.js'
 import { normalizeIndianPhone, formatPhoneLocal } from './phone.js'
 
 export { normalizeIndianPhone, formatPhoneLocal }
@@ -10,8 +10,9 @@ const MSG91_SMS_URLS = [
 ]
 
 const MSG91_OTP_URL = 'https://control.msg91.com/api/v5/otp'
+const MSG91_EMAIL_URL = 'https://control.msg91.com/api/v5/email/send'
 
-function getConfig() {
+function getSmsConfig() {
   const authKey = process.env.MSG91_AUTH_KEY?.trim().split(/\s+#/)[0]?.trim()
   const templateId = process.env.MSG91_OTP_TEMPLATE_ID?.trim().split(/\s+#/)[0]?.trim()
   const senderId = process.env.MSG91_SENDER_ID?.trim().split(/\s+#/)[0]?.trim()
@@ -22,30 +23,71 @@ function getConfig() {
   return { authKey, templateId, senderId, otpLength, otpExpiry, route, apiMode }
 }
 
+function getEmailConfig() {
+  const authKey = process.env.MSG91_AUTH_KEY?.trim().split(/\s+#/)[0]?.trim()
+  const templateId = process.env.MSG91_EMAIL_OTP_TEMPLATE_ID?.trim().split(/\s+#/)[0]?.trim() || 'loyalgenie_otp'
+  const domain = process.env.MSG91_EMAIL_DOMAIN?.trim().split(/\s+#/)[0]?.trim()
+  const fromEmail = process.env.MSG91_EMAIL_FROM?.trim().split(/\s+#/)[0]?.trim()
+  const fromName = process.env.MSG91_EMAIL_FROM_NAME?.trim().split(/\s+#/)[0]?.trim() || 'LoyalGenie'
+  const companyName = process.env.MSG91_COMPANY_NAME?.trim().split(/\s+#/)[0]?.trim() || 'LoyalGenie'
+  return { authKey, templateId, domain, fromEmail, fromName, companyName }
+}
+
 export function isMsg91Configured(): boolean {
   if (process.env.MSG91_DEV_OTP === 'true') return false
-  const { authKey, templateId, senderId, apiMode } = getConfig()
+  const { authKey, templateId, senderId, apiMode } = getSmsConfig()
   if (!authKey || !templateId) return false
   if (authKey.includes('your_auth_key') || templateId.includes('your_template')) return false
   if (apiMode !== 'widget' && !senderId) return false
   return true
 }
 
+export function isMsg91EmailConfigured(): boolean {
+  if (process.env.MSG91_DEV_OTP === 'true') return false
+  const { authKey, templateId, domain, fromEmail } = getEmailConfig()
+  if (!authKey || !templateId || !domain || !fromEmail) return false
+  if (authKey.includes('your_auth_key')) return false
+  if (domain.includes('your-domain') || fromEmail.includes('your-')) return false
+  return true
+}
+
 export function getMsg91SetupStatus() {
-  const { authKey, templateId, senderId, apiMode } = getConfig()
-  const missing: string[] = []
-  if (!authKey || authKey.includes('your_auth_key')) missing.push('MSG91_AUTH_KEY')
-  if (!templateId || templateId.includes('your_template')) missing.push('MSG91_OTP_TEMPLATE_ID')
-  if (apiMode !== 'widget' && !senderId) missing.push('MSG91_SENDER_ID')
-  if (process.env.MSG91_DEV_OTP === 'true') missing.push('MSG91_DEV_OTP (disable in production)')
+  const sms = getSmsConfig()
+  const email = getEmailConfig()
+  const smsMissing: string[] = []
+  const emailMissing: string[] = []
+
+  if (!sms.authKey || sms.authKey.includes('your_auth_key')) smsMissing.push('MSG91_AUTH_KEY')
+  if (!sms.templateId || sms.templateId.includes('your_template')) smsMissing.push('MSG91_OTP_TEMPLATE_ID')
+  if (sms.apiMode !== 'widget' && !sms.senderId) smsMissing.push('MSG91_SENDER_ID')
+
+  if (!email.authKey || email.authKey.includes('your_auth_key')) emailMissing.push('MSG91_AUTH_KEY')
+  if (!email.templateId) emailMissing.push('MSG91_EMAIL_OTP_TEMPLATE_ID')
+  if (!email.domain) emailMissing.push('MSG91_EMAIL_DOMAIN')
+  if (!email.fromEmail) emailMissing.push('MSG91_EMAIL_FROM')
+
+  if (process.env.MSG91_DEV_OTP === 'true') {
+    smsMissing.push('MSG91_DEV_OTP (disable in production)')
+    emailMissing.push('MSG91_DEV_OTP (disable in production)')
+  }
+
   return {
     configured: isMsg91Configured(),
-    apiMode,
-    missing,
+    emailConfigured: isMsg91EmailConfigured(),
+    apiMode: sms.apiMode,
+    missing: smsMissing,
+    emailMissing,
   }
 }
 
-type Msg91Response = { type?: string; message?: string; request_id?: string }
+type Msg91Response = {
+  type?: string
+  status?: string
+  message?: string
+  request_id?: string
+  hasError?: boolean
+  errors?: Record<string, unknown>
+}
 
 async function postMsg91(url: string, authKey: string, body: Record<string, unknown>): Promise<{ status: number; data: Msg91Response }> {
   const res = await fetch(url, {
@@ -63,13 +105,9 @@ async function postMsg91(url: string, authKey: string, body: Record<string, unkn
 /**
  * Send OTP via MSG91 SMS Template API.
  * Docs: https://docs.msg91.com/sms/send-sms
- * API:  https://api.msg91.com/apidoc/textsms/send-sms-flow.php
- *
- * Your LoyalGenie-OTP template uses ##var1## — this requires the SMS/Flow API,
- * NOT the OTP Widget API (/api/v5/otp) which only accepts ##OTP## templates.
  */
 async function sendOtpViaSmsTemplate(mobile: string, otp: string): Promise<void> {
-  const { authKey, templateId, senderId, route } = getConfig()
+  const { authKey, templateId, senderId, route } = getSmsConfig()
   if (!senderId) {
     throw new Error('MSG91_SENDER_ID_MISSING')
   }
@@ -95,7 +133,6 @@ async function sendOtpViaSmsTemplate(mobile: string, otp: string): Promise<void>
 
     lastError = data.message || lastError
 
-    // Retry uppercase VAR1 if lowercase var1 was rejected
     if (data.message?.toLowerCase().includes('variable') || data.message?.toLowerCase().includes('var')) {
       const upperPayload = {
         ...payload,
@@ -114,8 +151,48 @@ async function sendOtpViaSmsTemplate(mobile: string, otp: string): Promise<void>
   throw new Error(lastError)
 }
 
+/**
+ * Send OTP via MSG91 Email Template API.
+ * Docs: https://docs.msg91.com/email/send-email
+ */
+async function sendOtpViaEmailTemplate(email: string, otp: string): Promise<void> {
+  const { authKey, templateId, domain, fromEmail, fromName, companyName } = getEmailConfig()
+  if (!domain || !fromEmail) {
+    throw new Error('MSG91_EMAIL_NOT_CONFIGURED')
+  }
+
+  const normalized = email.trim().toLowerCase()
+  const payload: Record<string, unknown> = {
+    recipients: [
+      {
+        to: [{ email: normalized }],
+        variables: {
+          otp,
+          company_name: companyName,
+          LoyalGenie: companyName,
+        },
+      },
+    ],
+    from: { email: fromEmail, ...(fromName ? { name: fromName } : {}) },
+    domain,
+    template_id: templateId,
+  }
+
+  const { status, data } = await postMsg91(MSG91_EMAIL_URL, authKey!, payload)
+  console.log(`[MSG91 Email] send → ${normalized} | HTTP ${status} |`, JSON.stringify(data))
+
+  const ok =
+    status >= 200 &&
+    status < 300 &&
+    (data.status === 'success' || data.type === 'success' || data.hasError === false)
+  if (!ok) {
+    console.error('MSG91 Email send failed:', data)
+    throw new Error(data.message || 'EMAIL_OTP_SEND_FAILED')
+  }
+}
+
 async function sendOtpViaWidget(mobile: string): Promise<void> {
-  const { authKey, templateId, otpLength, otpExpiry } = getConfig()
+  const { authKey, templateId, otpLength, otpExpiry } = getSmsConfig()
   const url = `${MSG91_OTP_URL}?template_id=${encodeURIComponent(templateId!)}&mobile=${mobile}&otp_length=${otpLength}&otp_expiry=${otpExpiry}`
 
   const res = await fetch(url, {
@@ -144,11 +221,11 @@ export async function sendOtp(phone: string): Promise<void> {
       throw new Error('MSG91_NOT_CONFIGURED')
     }
     await saveOtp(phone, '123456')
-    console.log(`[dev] OTP for ${mobile}: 123456`)
+    console.log(`[dev] SMS OTP for ${mobile}: 123456`)
     return
   }
 
-  const { apiMode } = getConfig()
+  const { apiMode } = getSmsConfig()
   const otp = generateOtp()
   await saveOtp(phone, otp)
 
@@ -157,6 +234,25 @@ export async function sendOtp(phone: string): Promise<void> {
   } else {
     await sendOtpViaSmsTemplate(mobile, otp)
   }
+}
+
+export async function sendEmailOtp(email: string): Promise<void> {
+  const normalized = email.trim().toLowerCase()
+
+  if (!isMsg91EmailConfigured()) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('MSG91_EMAIL_NOT_CONFIGURED')
+    }
+    await saveEmailOtp(normalized, '123456')
+    console.warn(
+      `[dev] Email OTP for ${normalized}: 123456 (MSG91 email not configured — set MSG91_EMAIL_DOMAIN and MSG91_EMAIL_FROM in .env)`,
+    )
+    return
+  }
+
+  const otp = generateOtp()
+  await saveEmailOtp(normalized, otp)
+  await sendOtpViaEmailTemplate(normalized, otp)
 }
 
 export async function verifyOtp(phone: string, otp: string): Promise<void> {
@@ -168,11 +264,11 @@ export async function verifyOtp(phone: string, otp: string): Promise<void> {
     return
   }
 
-  const { apiMode } = getConfig()
+  const { apiMode } = getSmsConfig()
 
   if (apiMode === 'widget') {
     const mobile = normalizeIndianPhone(phone)
-    const { authKey } = getConfig()
+    const { authKey } = getSmsConfig()
     const url = `${MSG91_OTP_URL}/verify?mobile=${mobile}&otp=${encodeURIComponent(otp)}`
 
     const res = await fetch(url, {
@@ -189,6 +285,21 @@ export async function verifyOtp(phone: string, otp: string): Promise<void> {
   }
 
   const valid = await verifyStoredOtp(phone, otp)
+  if (!valid) {
+    throw new Error('INVALID_OTP')
+  }
+}
+
+export async function verifyEmailOtp(email: string, otp: string): Promise<void> {
+  if (!isMsg91EmailConfigured()) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('MSG91_EMAIL_NOT_CONFIGURED')
+    }
+    if (otp !== '123456') throw new Error('INVALID_OTP')
+    return
+  }
+
+  const valid = await verifyStoredEmailOtp(email, otp)
   if (!valid) {
     throw new Error('INVALID_OTP')
   }

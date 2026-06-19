@@ -235,6 +235,7 @@ export async function migrate() {
   for (const sql of COLUMN_PATCHES_CAMPAIGNS) await runOptional(sql)
   await db.executeMultiple(STAMP_CARD_MIGRATIONS)
   await migrateCustomerUsersForOtp()
+  await migrateBusinessUsersForEmailOtp()
   await db.executeMultiple(`
     CREATE TABLE IF NOT EXISTS otp_verifications (
       phone TEXT PRIMARY KEY,
@@ -337,6 +338,39 @@ async function migrateCustomerUsersForOtp() {
   await db.execute('ALTER TABLE customer_users_v2 RENAME TO customer_users')
   await db.execute('CREATE INDEX IF NOT EXISTS idx_customer_users_phone ON customer_users(phone)')
   await db.execute('CREATE INDEX IF NOT EXISTS idx_customer_users_email ON customer_users(email)')
+}
+
+async function migrateBusinessUsersForEmailOtp() {
+  const cols = await db.execute('PRAGMA table_info(business_users)')
+  const passwordCol = cols.rows.find((r) => r.name === 'password_hash')
+  if (passwordCol && passwordCol.notnull === 0) return
+
+  const rows = await db.execute('SELECT id, email, password_hash, created_at FROM business_users ORDER BY created_at ASC')
+
+  await db.execute(`
+    CREATE TABLE business_users_v2 (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
+  for (const row of rows.rows) {
+    await db.execute({
+      sql: 'INSERT INTO business_users_v2 (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)',
+      args: [
+        row.id as string,
+        row.email as string,
+        (row.password_hash as string | null) ?? null,
+        row.created_at as string,
+      ],
+    })
+  }
+
+  await db.execute('DROP TABLE business_users')
+  await db.execute('ALTER TABLE business_users_v2 RENAME TO business_users')
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_users_email ON business_users(email)')
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -26,10 +26,6 @@ router.post('/complete', async (req, res) => {
       })
     }
 
-    if (!authUser && !parsed.data.password) {
-      return res.status(422).json({ error: 'Password is required for new accounts' })
-    }
-
     const frontendBaseUrl = process.env.FRONTEND_URL ?? 'http://localhost:3000'
     const result = await completeOnboarding(parsed.data, frontendBaseUrl, authUser?.id)
 
@@ -49,9 +45,6 @@ router.post('/complete', async (req, res) => {
     }
     if (message === 'ALREADY_ONBOARDED') {
       return res.status(409).json({ error: 'You have already completed onboarding' })
-    }
-    if (message === 'PASSWORD_REQUIRED') {
-      return res.status(422).json({ error: 'Password is required' })
     }
     console.error('Onboarding error:', err)
     res.status(500).json({ error: 'Failed to complete onboarding' })

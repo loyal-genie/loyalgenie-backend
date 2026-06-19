@@ -4,7 +4,6 @@ import { db } from '../db/client.js'
 import { onboardingSchema } from './onboarding.js'
 
 export const businessUpdateSchema = onboardingSchema
-  .omit({ password: true })
   .partial()
   .extend({
     name: z.string().min(1).optional(),

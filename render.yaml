@@ -29,3 +29,13 @@ services:
         value: "10"
       - key: MSG91_OTP_LENGTH
         value: "6"
+      - key: MSG91_EMAIL_OTP_TEMPLATE_ID
+        value: loyalgenie_otp
+      - key: MSG91_EMAIL_DOMAIN
+        sync: false
+      - key: MSG91_EMAIL_FROM
+        sync: false
+      - key: MSG91_EMAIL_FROM_NAME
+        value: LoyalGenie
+      - key: MSG91_COMPANY_NAME
+        value: LoyalGenie

@@ -1,17 +1,17 @@
 import { Router } from 'express'
 import {
-  createBusinessUser,
   createCustomerUser,
-  signInBusiness,
   signInCustomerByPhone,
   signToken,
   signProfileCompletionToken,
   verifyProfileCompletionToken,
-  resetPasswordByEmail,
   verifyToken,
   getCustomerByPhone,
+  resolveBusinessUserByEmail,
+  signInBusinessByEmail,
+  registerBusinessUserAfterOtp,
 } from '../services/auth.js'
-import { sendOtp, verifyOtp } from '../services/msg91.js'
+import { sendOtp, verifyOtp, sendEmailOtp, verifyEmailOtp } from '../services/msg91.js'
 import { toStoredPhone } from '../services/phone.js'
 import { z } from 'zod'
 
@@ -48,10 +48,21 @@ const phoneSchema = z.object({
   phone: z.string().min(10, 'Valid phone number is required'),
 })
 
+const emailSchema = z.object({
+  email: z.string().email('Valid email is required'),
+})
+
 const otpSendSchema = phoneSchema
+
+const emailOtpSendSchema = emailSchema
 
 const otpLoginSchema = phoneSchema.extend({
   otp: z.string().length(6, 'Enter the 6-digit OTP'),
+})
+
+const emailOtpLoginSchema = emailSchema.extend({
+  otp: z.string().length(6, 'Enter the 6-digit OTP'),
+  intent: z.enum(['signin', 'signup']).optional().default('signin'),
 })
 
 const customerCompleteProfileSchema = z.object({
@@ -66,46 +77,89 @@ const otpVerifySchema = phoneSchema.extend({
   otp: z.string().length(6, 'Enter the 6-digit OTP'),
 })
 
-const signInSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-})
-
-const signUpSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-})
-
-const forgotPasswordSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-})
-
-function forgotPasswordHandler(role: 'business' | 'customer') {
-  return async (req: import('express').Request, res: import('express').Response) => {
-    try {
-      const parsed = forgotPasswordSchema.safeParse(req.body)
-      if (!parsed.success) {
-        return res.status(422).json({
-          error: 'Validation failed',
-          details: parsed.error.flatten().fieldErrors,
-        })
-      }
-
-      await resetPasswordByEmail(role, parsed.data.email, parsed.data.password)
-      res.json({ success: true, message: 'Password updated successfully' })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'RESET_FAILED'
-      if (message === 'EMAIL_NOT_FOUND') {
-        return res.status(404).json({ error: 'No account found for this email' })
-      }
-      console.error('Forgot password error:', err)
-      res.status(500).json({ error: 'Could not reset password' })
+router.post('/business/otp/send', async (req, res) => {
+  try {
+    const parsed = emailOtpSendSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(422).json({
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      })
     }
-  }
-}
 
-router.post('/business/forgot-password', forgotPasswordHandler('business'))
+    await sendEmailOtp(parsed.data.email)
+    res.json({ success: true, message: 'OTP sent to your email' })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'OTP_SEND_FAILED'
+    if (message === 'MSG91_EMAIL_NOT_CONFIGURED') {
+      return res.status(503).json({ error: 'Email OTP service is not configured' })
+    }
+    if (message === 'The given data is invalid' || message.includes('EMAIL_OTP')) {
+      return res.status(502).json({ error: 'Email provider rejected the send request. Check MSG91_EMAIL_DOMAIN and MSG91_EMAIL_FROM in backend .env.' })
+    }
+    console.error('Business email OTP send error:', err)
+    res.status(500).json({ error: 'Could not send OTP. Please try again.' })
+  }
+})
+
+router.post('/business/otp-login', async (req, res) => {
+  try {
+    const parsed = emailOtpLoginSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(422).json({
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      })
+    }
+
+    await verifyEmailOtp(parsed.data.email, parsed.data.otp)
+    const existing = await resolveBusinessUserByEmail(parsed.data.email)
+    const intent = parsed.data.intent
+
+    if (intent === 'signin') {
+      if (!existing) {
+        return res.status(404).json({ error: 'No account found for this email. Create a business account instead.' })
+      }
+      const result = await signInBusinessByEmail(parsed.data.email)
+      return res.json({ success: true, data: result })
+    }
+
+    if (existing) {
+      return res.status(409).json({ error: 'An account with this email already exists. Sign in instead.' })
+    }
+
+    const result = await registerBusinessUserAfterOtp(parsed.data.email)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'LOGIN_FAILED'
+    if (message.toLowerCase().includes('otp') || message === 'INVALID_OTP') {
+      return res.status(401).json({ error: 'Invalid or expired OTP. Please try again.' })
+    }
+    if (message === 'EMAIL_EXISTS') {
+      return res.status(409).json({ error: 'An account with this email already exists. Sign in instead.' })
+    }
+    if (message === 'EMAIL_NOT_FOUND') {
+      return res.status(404).json({ error: 'No account found for this email. Create a business account instead.' })
+    }
+    console.error('Business email OTP login error:', err)
+    res.status(500).json({ error: 'Could not verify OTP. Please try again.' })
+  }
+})
+
+/** @deprecated use /business/otp-login */
+router.post('/business/signin', (_req, res) => {
+  res.status(410).json({ error: 'Password sign in is no longer supported. Use email OTP on /business/signin.' })
+})
+
+/** @deprecated use /business/otp-login */
+router.post('/business/signup', (_req, res) => {
+  res.status(410).json({ error: 'Password sign up is no longer supported. Use email OTP on /business/signin.' })
+})
+
+/** @deprecated password reset replaced by email OTP sign in */
+router.post('/business/forgot-password', (_req, res) => {
+  res.status(410).json({ error: 'Password reset is no longer supported. Sign in with email OTP instead.' })
+})
 
 router.post('/otp/send', async (req, res) => {
   try {
@@ -281,52 +335,6 @@ router.post('/customer/signin', async (req, res) => {
 /** @deprecated use /customer/otp-login + /customer/complete-profile */
 router.post('/customer/signup', async (_req, res) => {
   res.status(410).json({ error: 'Sign up is now part of sign in. Use mobile OTP on /signin.' })
-})
-
-router.post('/business/signin', async (req, res) => {
-  try {
-    const parsed = signInSchema.safeParse(req.body)
-    if (!parsed.success) {
-      return res.status(422).json({ error: 'Invalid email or password' })
-    }
-
-    const result = await signInBusiness(parsed.data.email, parsed.data.password)
-    res.json({ success: true, data: result })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'SIGNIN_FAILED'
-    if (message === 'INVALID_CREDENTIALS') {
-      return res.status(401).json({ error: 'Invalid email or password' })
-    }
-    console.error('Signin error:', err)
-    res.status(500).json({ error: 'Sign in failed' })
-  }
-})
-
-router.post('/business/signup', async (req, res) => {
-  try {
-    const parsed = signUpSchema.safeParse(req.body)
-    if (!parsed.success) {
-      return res.status(422).json({
-        error: 'Validation failed',
-        details: parsed.error.flatten().fieldErrors,
-      })
-    }
-
-    const user = await createBusinessUser(parsed.data.email, parsed.data.password)
-    const token = signToken({ ...user, role: 'business' })
-
-    res.status(201).json({
-      success: true,
-      data: { token, userId: user.id, email: user.email, role: 'business', onboarded: false },
-    })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'SIGNUP_FAILED'
-    if (message === 'EMAIL_EXISTS') {
-      return res.status(409).json({ error: 'An account with this email already exists' })
-    }
-    console.error('Signup error:', err)
-    res.status(500).json({ error: 'Sign up failed' })
-  }
 })
 
 export default router

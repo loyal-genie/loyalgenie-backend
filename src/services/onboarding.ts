@@ -16,7 +16,6 @@ export const onboardingSchema = z.object({
   mobile: z.string().min(10, 'Valid mobile number is required'),
   whatsapp: z.string().optional().default(''),
   email: z.string().email('Valid email is required'),
-  password: z.string().min(8, 'Password must be at least 8 characters').optional(),
   city: z.string().min(1, 'City is required'),
   pincode: z.string().optional().default(''),
   landmark: z.string().optional().default(''),
@@ -56,8 +55,7 @@ export async function completeOnboarding(
   let userId = existingUserId
 
   if (!userId) {
-    if (!payload.password) throw new Error('PASSWORD_REQUIRED')
-    const user = await createBusinessUser(payload.email, payload.password)
+    const user = await createBusinessUser(payload.email)
     userId = user.id
   } else {
     const existing = await getBusinessForUser(userId)

@@ -1,4 +1,3 @@
-import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { nanoid } from 'nanoid'
 import { db } from '../db/client.js'
@@ -64,38 +63,30 @@ export function verifyProfileCompletionToken(token: string): string | null {
   }
 }
 
-export async function hashPassword(password: string) {
-  return bcrypt.hash(password, 12)
-}
-
-export async function verifyPassword(password: string, hash: string) {
-  return bcrypt.compare(password, hash)
-}
-
-export async function createBusinessUser(email: string, password: string) {
-  const existing = await db.execute({ sql: 'SELECT id FROM business_users WHERE email = ?', args: [email.toLowerCase()] })
+export async function createBusinessUser(email: string) {
+  const normalized = email.toLowerCase()
+  const existing = await db.execute({ sql: 'SELECT id FROM business_users WHERE email = ?', args: [normalized] })
   if (existing.rows.length > 0) throw new Error('EMAIL_EXISTS')
 
   const id = nanoid()
-  const passwordHash = await hashPassword(password)
   await db.execute({
-    sql: 'INSERT INTO business_users (id, email, password_hash) VALUES (?, ?, ?)',
-    args: [id, email.toLowerCase(), passwordHash],
+    sql: 'INSERT INTO business_users (id, email, password_hash) VALUES (?, ?, NULL)',
+    args: [id, normalized],
   })
-  return { id, email: email.toLowerCase() }
+  return { id, email: normalized }
 }
 
-/** Login/reset email may match business_users.email or businesses.email on the linked account. */
-async function resolveBusinessUserByEmail(email: string) {
+/** Login email may match business_users.email or businesses.email on the linked account. */
+export async function resolveBusinessUserByEmail(email: string) {
   const normalized = email.toLowerCase()
   const direct = await db.execute({
-    sql: 'SELECT id, email, password_hash FROM business_users WHERE email = ?',
+    sql: 'SELECT id, email FROM business_users WHERE email = ?',
     args: [normalized],
   })
   if (direct.rows[0]) return direct.rows[0]
 
   const viaBusiness = await db.execute({
-    sql: `SELECT bu.id, bu.email, bu.password_hash
+    sql: `SELECT bu.id, bu.email
           FROM businesses b
           JOIN business_users bu ON bu.id = b.user_id
           WHERE lower(b.email) = ?
@@ -105,15 +96,12 @@ async function resolveBusinessUserByEmail(email: string) {
   return viaBusiness.rows[0] ?? null
 }
 
-export async function signInBusiness(email: string, password: string) {
-  const row = await resolveBusinessUserByEmail(email)
-  if (!row) throw new Error('INVALID_CREDENTIALS')
-
-  const valid = await verifyPassword(password, row.password_hash as string)
-  if (!valid) throw new Error('INVALID_CREDENTIALS')
+export async function signInBusinessByEmail(loginEmail: string) {
+  const row = await resolveBusinessUserByEmail(loginEmail)
+  if (!row) throw new Error('EMAIL_NOT_FOUND')
 
   const user = { id: row.id as string, email: row.email as string }
-  const business = await getBusinessForUser(user.id)
+  const business = await resolveBusinessForLogin(user.id, loginEmail)
   const token = signToken({ ...user, role: 'business' })
 
   return {
@@ -123,6 +111,7 @@ export async function signInBusiness(email: string, password: string) {
     role: 'business' as const,
     businessId: business?.id as string | undefined,
     onboarded: Boolean(business),
+    isNewUser: false,
   }
 }
 
@@ -132,6 +121,29 @@ export async function getBusinessForUser(userId: string) {
     args: [userId],
   })
   return result.rows[0] ?? null
+}
+
+/** Resolve business profile for login — by user_id, then by login email (legacy rows). */
+async function resolveBusinessForLogin(userId: string, loginEmail: string) {
+  const byUser = await getBusinessForUser(userId)
+  if (byUser) return byUser
+
+  const normalized = loginEmail.toLowerCase()
+  const byEmail = await db.execute({
+    sql: 'SELECT id, name, qr_slug, user_id FROM businesses WHERE lower(email) = ? LIMIT 1',
+    args: [normalized],
+  })
+  const row = byEmail.rows[0]
+  if (!row) return null
+
+  if (!row.user_id) {
+    await db.execute({
+      sql: 'UPDATE businesses SET user_id = ? WHERE id = ?',
+      args: [userId, row.id as string],
+    })
+  }
+
+  return { id: row.id, name: row.name, qr_slug: row.qr_slug }
 }
 
 export async function getUserByEmail(email: string) {
@@ -213,33 +225,15 @@ export async function signInCustomerByPhone(phone: string) {
   }
 }
 
-export async function resetPasswordByEmail(
-  role: 'business' | 'customer',
-  email: string,
-  newPassword: string,
-) {
-  if (role === 'business') {
-    const row = await resolveBusinessUserByEmail(email)
-    if (!row) throw new Error('EMAIL_NOT_FOUND')
-
-    const passwordHash = await hashPassword(newPassword)
-    await db.execute({
-      sql: 'UPDATE business_users SET password_hash = ? WHERE id = ?',
-      args: [passwordHash, row.id as string],
-    })
-    return
+export async function registerBusinessUserAfterOtp(email: string) {
+  const user = await createBusinessUser(email)
+  const token = signToken({ ...user, role: 'business' })
+  return {
+    token,
+    userId: user.id,
+    email: user.email,
+    role: 'business' as const,
+    onboarded: false,
+    isNewUser: true,
   }
-
-  const result = await db.execute({
-    sql: 'SELECT id FROM customer_users WHERE email = ?',
-    args: [email.toLowerCase()],
-  })
-  const row = result.rows[0]
-  if (!row) throw new Error('EMAIL_NOT_FOUND')
-
-  const passwordHash = await hashPassword(newPassword)
-  await db.execute({
-    sql: 'UPDATE customer_users SET password_hash = ? WHERE id = ?',
-    args: [passwordHash, row.id as string],
-  })
 }
