@@ -245,7 +245,18 @@ export async function migrate() {
     );
   `)
   await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
+  await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
+  await migrateRewardRedemptionStatuses()
   console.log('Database migrations applied.')
+}
+
+/** Backfill requested_at for rewards already in the vendor queue before the earned→pending flow. */
+async function migrateRewardRedemptionStatuses() {
+  await db.execute(`
+    UPDATE customer_rewards
+    SET requested_at = earned_at
+    WHERE status = 'pending' AND requested_at IS NULL
+  `)
 }
 
 async function migrateCustomerUsersForOtp() {

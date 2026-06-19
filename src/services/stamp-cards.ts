@@ -548,7 +548,7 @@ async function applyTriggerResults(
       statements.push({
         sql: `INSERT INTO customer_rewards
               (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`,
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'))`,
         args: [nanoid(), customerId, campaignId, t.playId, t.reward.name, t.reward.icon, t.code],
       })
     }

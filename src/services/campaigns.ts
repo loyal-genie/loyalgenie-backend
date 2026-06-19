@@ -1496,7 +1496,7 @@ export async function executeShakePlay(
     statements.push({
       sql: `INSERT INTO customer_rewards
             (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'))`,
       args: [nanoid(), customerId, campaignId, playId, reward.name, reward.icon, redemptionCode],
     })
   }
@@ -1540,7 +1540,25 @@ export async function listCustomerRewards(customerId: string) {
     icon: (row.icon as string) ?? '🎁',
     earnedAt: row.earned_at as string,
     status: row.status as string,
+    requestedAt: (row.requested_at as string) ?? undefined,
     redeemedAt: (row.redeemed_at as string) ?? undefined,
     code: row.redemption_code as string,
   }))
+}
+
+export async function requestCustomerRedemption(customerId: string, rewardId: string) {
+  const check = await db.execute({
+    sql: `SELECT id, status FROM customer_rewards WHERE id = ? AND customer_id = ?`,
+    args: [rewardId, customerId],
+  })
+  if (check.rows.length === 0) throw new Error('REWARD_NOT_FOUND')
+  const status = check.rows[0]!.status as string
+  if (status === 'pending') throw new Error('ALREADY_REQUESTED')
+  if (status === 'redeemed') throw new Error('ALREADY_REDEEMED')
+  if (status !== 'earned') throw new Error('INVALID_STATUS')
+
+  await db.execute({
+    sql: `UPDATE customer_rewards SET status = 'pending', requested_at = datetime('now') WHERE id = ?`,
+    args: [rewardId],
+  })
 }

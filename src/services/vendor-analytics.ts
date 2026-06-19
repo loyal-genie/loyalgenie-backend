@@ -31,7 +31,8 @@ export interface VendorCustomerReward {
   reward: string
   icon: string
   earnedAt: string
-  status: 'pending' | 'redeemed'
+  status: 'earned' | 'pending' | 'redeemed'
+  requestedAt?: string
   redeemedAt?: string
   code: string
 }
@@ -70,6 +71,7 @@ export interface VendorRedemptionItem {
   campaignName: string
   mechanic: string
   earnedAt: string
+  requestedAt?: string
   code: string
 }
 
@@ -337,7 +339,7 @@ export async function getVendorCustomer(userId: string, customerId: string): Pro
   const rewardsResult = await db.execute({
     sql: `
       SELECT cr.id, cr.campaign_id, c.name AS campaign_name, c.mechanic,
-             cr.reward_name, cr.icon, cr.earned_at, cr.status, cr.redeemed_at, cr.redemption_code
+             cr.reward_name, cr.icon, cr.earned_at, cr.status, cr.requested_at, cr.redeemed_at, cr.redemption_code
       FROM customer_rewards cr
       INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
       WHERE cr.customer_id = ?
@@ -354,7 +356,8 @@ export async function getVendorCustomer(userId: string, customerId: string): Pro
     reward: row.reward_name as string,
     icon: (row.icon as string) ?? '🎁',
     earnedAt: row.earned_at as string,
-    status: row.status as 'pending' | 'redeemed',
+    status: row.status as 'earned' | 'pending' | 'redeemed',
+    requestedAt: (row.requested_at as string) ?? undefined,
     redeemedAt: (row.redeemed_at as string) ?? undefined,
     code: row.redemption_code as string,
   }))
@@ -413,12 +416,12 @@ export async function listPendingRedemptions(userId: string): Promise<VendorRede
     sql: `
       SELECT cr.id, cr.customer_id, cu.name AS customer_name, cu.phone,
              cr.reward_name, c.name AS campaign_name, c.mechanic,
-             cr.earned_at, cr.redemption_code
+             cr.requested_at, cr.earned_at, cr.redemption_code
       FROM customer_rewards cr
       INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
       INNER JOIN customer_users cu ON cu.id = cr.customer_id
       WHERE cr.status = 'pending'
-      ORDER BY cr.earned_at ASC
+      ORDER BY COALESCE(cr.requested_at, cr.earned_at) ASC
     `,
     args: [businessId],
   })
@@ -432,6 +435,7 @@ export async function listPendingRedemptions(userId: string): Promise<VendorRede
     campaignName: row.campaign_name as string,
     mechanic: row.mechanic as string,
     earnedAt: row.earned_at as string,
+    requestedAt: (row.requested_at as string) ?? undefined,
     code: row.redemption_code as string,
   }))
 }

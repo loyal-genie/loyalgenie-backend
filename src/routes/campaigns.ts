@@ -16,6 +16,7 @@ import {
   type UpdateCampaignPayload,
   executeShakePlay,
   listCustomerRewards,
+  requestCustomerRedemption,
 } from '../services/campaigns.js'
 import {
   getStampState,
@@ -49,6 +50,26 @@ router.get('/customer/rewards', requireCustomerAuth, async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to fetch rewards' })
+  }
+})
+
+router.post('/customer/rewards/:id/request-redemption', requireCustomerAuth, async (req, res) => {
+  try {
+    await requestCustomerRedemption(req.user!.id, String(req.params.id))
+    res.json({ success: true })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'REQUEST_FAILED'
+    if (message === 'REWARD_NOT_FOUND') {
+      return res.status(404).json({ error: 'Reward not found' })
+    }
+    if (message === 'ALREADY_REQUESTED') {
+      return res.status(409).json({ error: 'Redemption already requested' })
+    }
+    if (message === 'ALREADY_REDEEMED') {
+      return res.status(409).json({ error: 'Reward already redeemed' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to request redemption' })
   }
 })
 

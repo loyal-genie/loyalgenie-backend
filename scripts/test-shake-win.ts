@@ -767,6 +767,29 @@ async function runApiTests() {
   const wallet = await getCustomerRewards(winCustomer.token)
   const rewardId = wallet.json.data?.[0]?.id ?? null
   assert('Winner has wallet entry', Boolean(rewardId), `rewardId=${rewardId}`)
+  assert('Wallet entry starts as earned', wallet.json.data?.[0]?.status === 'earned', `status=${wallet.json.data?.[0]?.status}`)
+
+  const pendingBefore = await api<{ success?: boolean; data?: Array<{ id: string }> }>(
+    'GET',
+    '/business/redemptions/pending',
+    undefined,
+    vendorToken,
+  )
+  assert(
+    'Vendor queue empty before customer redeems',
+    pendingBefore.status === 200 && (pendingBefore.json.data?.length ?? 0) === 0,
+    `pending=${pendingBefore.json.data?.length ?? 0}`,
+  )
+
+  if (rewardId) {
+    const requested = await api<{ success?: boolean }>(
+      'POST',
+      `/campaigns/customer/rewards/${rewardId}/request-redemption`,
+      undefined,
+      winCustomer.token,
+    )
+    assert('Customer can request redemption', requested.status === 200, `status ${requested.status}`)
+  }
 
   const pending = await api<{ success?: boolean; data?: Array<{ id: string }> }>(
     'GET',
@@ -775,7 +798,7 @@ async function runApiTests() {
     vendorToken,
   )
   assert(
-    'Vendor sees pending redemption',
+    'Vendor sees pending redemption after customer redeems',
     pending.status === 200 && (pending.json.data?.length ?? 0) > 0,
     `pending=${pending.json.data?.length ?? 0}`,
   )

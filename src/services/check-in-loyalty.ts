@@ -116,7 +116,7 @@ async function awardNewMilestones(
       {
         sql: `INSERT INTO customer_rewards
               (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`,
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'))`,
         args: [nanoid(), customerId, campaignId, playId, milestone.name, milestone.icon, code],
       },
       {
