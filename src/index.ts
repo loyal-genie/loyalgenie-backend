@@ -65,14 +65,24 @@ function isVercelAppOrigin(origin: string): boolean {
   }
 }
 
+function isLoyalGenieOrigin(origin: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(origin)
+    if (protocol !== 'https:') return false
+    return hostname === 'loyalgenie.in' || hostname === 'www.loyalgenie.in'
+  } catch {
+    return false
+  }
+}
+
 function isOriginAllowed(origin: string, allowedOrigins: string[]): boolean {
   const normalized = normalizeOrigin(origin)
   if (allowedOrigins.includes(normalized)) return true
+  if (isLoyalGenieOrigin(normalized)) return true
   if (process.env.NODE_ENV !== 'production' && /^http:\/\/localhost:\d+$/.test(normalized)) {
     return true
   }
   if (allowedOrigins.some(allowed => isVercelPreviewOrigin(normalized, allowed))) return true
-  // Frontend is hosted on Vercel — allow production + preview URLs
   if (isVercelAppOrigin(normalized)) return true
   return false
 }
@@ -82,11 +92,16 @@ const allowedOrigins = buildAllowedOrigins()
 app.use(cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true)
-    if (isOriginAllowed(origin, allowedOrigins)) return callback(null, true)
+    if (isOriginAllowed(origin, allowedOrigins)) {
+      // Must echo the request origin (not `true`) when credentials: true
+      return callback(null, origin)
+    }
     console.warn(`CORS blocked origin: ${origin} (allowed: ${allowedOrigins.join(', ')})`)
     callback(null, false)
   },
   credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 app.use(express.json({ limit: '15mb' }))
 
@@ -96,6 +111,7 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     service: 'loyalgenie-backend',
     msg91,
+    corsOrigins: allowedOrigins,
   })
 })
 
