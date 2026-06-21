@@ -1,14 +1,16 @@
 import { z } from 'zod'
 
+export const LOYALTY_POINTS_THRESHOLD_MAX = 99_999
+
 export const loyaltyMilestoneSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional().default(''),
   icon: z.string().min(1).default('🎁'),
-  pointsThreshold: z.number().int().min(1),
+  pointsThreshold: z.number().int().min(1).max(LOYALTY_POINTS_THRESHOLD_MAX),
 })
 
 export const checkInLoyaltyConfigSchema = z.object({
-  pointsPerCheckIn: z.number().int().min(1).max(100),
+  pointsPerCheckIn: z.number().int().min(1).max(999),
 })
 
 export const createCheckInLoyaltyCampaignSchema = z.object({
