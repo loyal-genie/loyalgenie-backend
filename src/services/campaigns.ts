@@ -986,7 +986,8 @@ export async function listBusinessesWithActiveCampaigns() {
   await autoEndExpiredCampaigns()
   const today = todayInCampaignTz()
   const result = await db.execute({
-    sql: `SELECT DISTINCT b.id, b.name, b.tagline, b.business_type, b.city, b.brand_color
+    sql: `SELECT DISTINCT b.id, b.name, b.tagline, b.business_type, b.city, b.brand_color,
+                 b.logo_data, b.cover_banner_data
           FROM businesses b
           INNER JOIN campaigns c ON c.business_id = b.id
           WHERE c.status = 'active'
@@ -1032,6 +1033,8 @@ export async function listBusinessesWithActiveCampaigns() {
         businessType: (row.business_type as string) ?? 'Business',
         city: (row.city as string) ?? '',
         brandColor: (row.brand_color as string) ?? '#7C3AED',
+        logoData: (row.logo_data as string) ?? '',
+        coverBannerData: (row.cover_banner_data as string) ?? '',
         campaigns: campaigns.map(c => ({
           id: c.id as string,
           name: c.name as string,
