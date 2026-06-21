@@ -79,6 +79,11 @@ const COLUMN_PATCHES = [
   'ALTER TABLE businesses ADD COLUMN cover_banner_data TEXT',
   'ALTER TABLE businesses ADD COLUMN interior_photos_data TEXT',
   'ALTER TABLE businesses ADD COLUMN exterior_photos_data TEXT',
+  'ALTER TABLE businesses ADD COLUMN rating REAL',
+  'ALTER TABLE businesses ADD COLUMN latitude REAL',
+  'ALTER TABLE businesses ADD COLUMN longitude REAL',
+  'ALTER TABLE businesses ADD COLUMN display_distance_km REAL',
+  'ALTER TABLE businesses ADD COLUMN mechanic_tags TEXT',
 ]
 
 const INDEX_PATCHES = [

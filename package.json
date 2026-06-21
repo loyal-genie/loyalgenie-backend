@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "build": "tsc",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:seed-profiles": "tsx scripts/seed-business-profiles.ts",
     "test:shake": "tsx scripts/test-shake-win.ts",
     "test:stamp": "tsx scripts/test-stamp-cards.ts",
     "test:stamp:e2e": "tsx scripts/test-stamp-e2e-prod.ts",

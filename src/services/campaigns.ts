@@ -987,14 +987,31 @@ export async function listBusinessesWithActiveCampaigns() {
   const today = todayInCampaignTz()
   const result = await db.execute({
     sql: `SELECT DISTINCT b.id, b.name, b.tagline, b.business_type, b.city, b.brand_color,
-                 b.logo_data, b.cover_banner_data
+                 b.logo_data, b.cover_banner_data, b.address, b.landmark, b.mobile,
+                 b.operating_hours, b.google_review, b.interior_photos_data,
+                 b.rating, b.latitude, b.longitude, b.display_distance_km, b.mechanic_tags,
+                 br.address AS branch_address, br.city AS branch_city
           FROM businesses b
           INNER JOIN campaigns c ON c.business_id = b.id
+          LEFT JOIN branches br ON br.business_id = b.id AND br.is_primary = 1
           WHERE c.status = 'active'
             AND c.start_date <= ?
           ORDER BY b.name ASC`,
     args: [today],
   })
+
+  function parsePhotoArray(raw: unknown): string[] {
+    if (Array.isArray(raw)) return raw as string[]
+    if (typeof raw === 'string' && raw) {
+      try {
+        const parsed = JSON.parse(raw)
+        return Array.isArray(parsed) ? parsed : []
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
 
   const businesses = await Promise.all(
     result.rows.map(async row => {
@@ -1035,6 +1052,19 @@ export async function listBusinessesWithActiveCampaigns() {
         brandColor: (row.brand_color as string) ?? '#7C3AED',
         logoData: (row.logo_data as string) ?? '',
         coverBannerData: (row.cover_banner_data as string) ?? '',
+        address: (row.address as string) ?? '',
+        landmark: (row.landmark as string) ?? '',
+        mobile: (row.mobile as string) ?? '',
+        operatingHours: (row.operating_hours as string) ?? '',
+        googleReview: (row.google_review as string) ?? '',
+        interiorPhotosData: parsePhotoArray(row.interior_photos_data),
+        branchAddress: (row.branch_address as string) ?? '',
+        branchCity: (row.branch_city as string) ?? '',
+        rating: row.rating != null ? Number(row.rating) : null,
+        latitude: row.latitude != null ? Number(row.latitude) : null,
+        longitude: row.longitude != null ? Number(row.longitude) : null,
+        displayDistanceKm: row.display_distance_km != null ? Number(row.display_distance_km) : null,
+        mechanicTags: parsePhotoArray(row.mechanic_tags),
         campaigns: campaigns.map(c => ({
           id: c.id as string,
           name: c.name as string,
