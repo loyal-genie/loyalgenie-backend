@@ -1,40 +1,30 @@
 /**
- * Daily win quota — player-based (not play-based).
+ * Win quota — fixed overall winner cap (not percentage-based).
  *
- * ## Definitions
- * - **Player** = unique customer who plays today.
- * - **Daily target** = `round(N × winRate%)` **unique players** who win when N players have played.
- *   Example: 25 players × 100% → **25 winners**. 50 players × 5% → **3 winners**.
+ * - **overallWinners**: max unique winners across the whole campaign.
+ * - Each customer wins at most once per day.
+ * - Plays per user/day only limits attempts — never affects win odds.
+ * - Daily user limit (enrollment) is separate — handled in checkEligibility.
  *
- * ## Who wins?
- * - Each customer can win **at most once per day**.
- * - `winsBefore` counts **distinct winning players**, not total winning plays.
- * - First play today: gap-based lottery among new players entering the pool.
- * - Repeat play (same day, no win yet): lottery for remaining winner slots among non-winners.
- *
- * Plays per user/day only controls how many attempts a customer gets — it does not inflate the winner count.
+ * Winners are drawn randomly across the campaign until the overall cap is reached.
+ * Among today's non-winners, each eligible play gets
+ * `slotsRemaining / nonWinnersRemaining` chance to win.
  */
 
 export interface DailyQuotaContext {
   uniquePlayersBefore: number
   isFirstPlayToday: boolean
-  winsBefore: number
-  winRatePercent: number
-  /** Kept for API compatibility. */
-  perDayUserLimit: number
+  winsBeforeToday: number
+  totalWinsBefore: number
+  overallWinners: number
   customerAlreadyWonToday?: boolean
 }
 
 export interface DailyQuotaSnapshot {
   uniquePlayersAfter: number
-  targetWins: number
-  targetBefore: number
-  winsBefore: number
+  winsBeforeToday: number
+  totalWinsBefore: number
   slotsRemaining: number
-}
-
-export function targetWinsForPlayers(uniquePlayers: number, winRatePercent: number): number {
-  return Math.round((uniquePlayers * winRatePercent) / 100)
 }
 
 export function dailyQuotaSnapshot(ctx: DailyQuotaContext): DailyQuotaSnapshot {
@@ -42,15 +32,11 @@ export function dailyQuotaSnapshot(ctx: DailyQuotaContext): DailyQuotaSnapshot {
     ? ctx.uniquePlayersBefore + 1
     : ctx.uniquePlayersBefore
 
-  const targetWins = targetWinsForPlayers(uniquePlayersAfter, ctx.winRatePercent)
-  const targetBefore = targetWinsForPlayers(ctx.uniquePlayersBefore, ctx.winRatePercent)
-
   return {
     uniquePlayersAfter,
-    targetWins,
-    targetBefore,
-    winsBefore: ctx.winsBefore,
-    slotsRemaining: Math.max(0, targetWins - ctx.winsBefore),
+    winsBeforeToday: ctx.winsBeforeToday,
+    totalWinsBefore: ctx.totalWinsBefore,
+    slotsRemaining: Math.max(0, ctx.overallWinners - ctx.totalWinsBefore),
   }
 }
 
@@ -61,40 +47,41 @@ export function rollWinWithDailyQuota(
   if (ctx.customerAlreadyWonToday) return false
 
   const snap = dailyQuotaSnapshot(ctx)
-  if (ctx.winsBefore >= snap.targetWins) return false
+  if (snap.slotsRemaining <= 0) return false
 
-  if (ctx.isFirstPlayToday) {
-    if (ctx.winsBefore < snap.targetBefore) return true
-    const gap = snap.targetWins - ctx.winsBefore
-    return rng() < gap
-  }
+  const nonWinnersRemaining = Math.max(1, snap.uniquePlayersAfter - ctx.winsBeforeToday)
+  return rng() < snap.slotsRemaining / nonWinnersRemaining
+}
 
-  const slotsRemaining = snap.targetWins - ctx.winsBefore
-  const nonWinnersRemaining = Math.max(1, snap.uniquePlayersAfter - ctx.winsBefore)
-  return rng() < slotsRemaining / nonWinnersRemaining
+/** @deprecated Use cap-based fields in tests only. */
+export function targetWinsForPlayers(uniquePlayers: number, winRatePercent: number): number {
+  return Math.round((uniquePlayers * winRatePercent) / 100)
 }
 
 export function simulateDay(
   uniquePlayers: number,
-  winRatePercent: number,
-  perDayUserLimit: number,
+  overallWinners: number,
   rng: () => number = Math.random,
 ): number {
-  let wins = 0
+  let winsToday = 0
+  let totalWins = 0
   let unique = 0
   for (let i = 0; i < uniquePlayers; i++) {
     const won = rollWinWithDailyQuota(
       {
         uniquePlayersBefore: unique,
         isFirstPlayToday: true,
-        winsBefore: wins,
-        winRatePercent,
-        perDayUserLimit,
+        winsBeforeToday: winsToday,
+        totalWinsBefore: totalWins,
+        overallWinners,
       },
       rng,
     )
-    if (won) wins++
+    if (won) {
+      winsToday++
+      totalWins++
+    }
     unique++
   }
-  return wins
+  return winsToday
 }

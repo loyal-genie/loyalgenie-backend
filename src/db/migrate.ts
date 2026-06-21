@@ -172,6 +172,8 @@ const COLUMN_PATCHES_CAMPAIGNS = [
   'ALTER TABLE campaign_rewards ADD COLUMN reward_tier TEXT',
   'ALTER TABLE campaigns ADD COLUMN previous_pin TEXT',
   'ALTER TABLE campaigns ADD COLUMN previous_pin_valid_until TEXT',
+  'ALTER TABLE campaigns ADD COLUMN overall_winners INTEGER',
+  'ALTER TABLE campaigns ADD COLUMN daily_winner_cap INTEGER',
 ]
 
 const STAMP_CARD_MIGRATIONS = `
@@ -253,7 +255,39 @@ export async function migrate() {
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
   await migrateRewardRedemptionStatuses()
   await migrateShakeWinRateToPlayerBased()
+  await migrateShakeWinnerCaps()
   console.log('Database migrations applied.')
+}
+
+/** Replace percentage-based win rate with explicit overall + daily winner caps. */
+async function migrateShakeWinnerCaps() {
+  await runOptional(`CREATE TABLE IF NOT EXISTS schema_patches (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`)
+  const applied = await db.execute({
+    sql: 'SELECT 1 FROM schema_patches WHERE id = ?',
+    args: ['shake_winner_caps_2026_06'],
+  })
+  if (applied.rows.length > 0) return
+
+  await db.execute(`
+    UPDATE campaigns
+    SET overall_winners = MAX(1, CAST(ROUND(user_cap * win_rate_percent / 100.0) AS INTEGER)),
+        daily_winner_cap = MAX(1, CAST(ROUND(
+          CASE
+            WHEN start_date = end_date THEN user_cap
+            ELSE per_day_user_limit
+          END * win_rate_percent / 100.0
+        ) AS INTEGER))
+    WHERE mechanic = 'shake'
+      AND (overall_winners IS NULL OR daily_winner_cap IS NULL)
+  `)
+
+  await db.execute({
+    sql: 'INSERT INTO schema_patches (id) VALUES (?)',
+    args: ['shake_winner_caps_2026_06'],
+  })
 }
 
 /** Win rate was historically derived from total plays (cap × plays/day). Re-base on players only. */

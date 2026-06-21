@@ -54,7 +54,7 @@ export const createShakeCampaignSchema = z.object({
   userCap: z.number().int().min(1),
   perDayUserLimit: z.number().int().min(1),
   playsPerDay: z.number().int().min(1).max(10),
-  winRatePercent: z.number().int().min(1).max(100),
+  overallWinners: z.number().int().min(1),
   rewards: z.array(rewardSchema).min(1),
 })
 
@@ -89,6 +89,8 @@ export const updateCampaignSchema = z.object({
   userCap: z.number().int().min(1).optional(),
   playsPerDay: z.number().int().min(1).max(10).optional(),
   perDayUserLimit: z.number().int().min(1).optional(),
+  overallWinners: z.number().int().min(1).optional(),
+  /** @deprecated use overallWinners */
   winRatePercent: z.number().int().min(1).max(100).optional(),
   status: z.enum(['active', 'paused', 'ended']).optional(),
   rewards: z.union([
@@ -110,6 +112,8 @@ export interface UpdateCampaignPayload {
   userCap?: number
   playsPerDay?: number
   perDayUserLimit?: number
+  overallWinners?: number
+  /** @deprecated use overallWinners */
   winRatePercent?: number
   status?: 'active' | 'paused' | 'ended'
   rewards?:
@@ -158,6 +162,8 @@ export interface CampaignRow {
   userCap: number
   perDayUserLimit: number
   playsPerDay: number
+  overallWinners: number
+  /** Derived for legacy display: round(overallWinners / userCap × 100) */
   winRatePercent: number
   pin: string | null
   pinExpiresAt: string | null
@@ -371,6 +377,8 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   const stats = await fetchStats(id)
   const rewards = await fetchRewards(id)
   const mechanic = row.mechanic as string
+  const userCap = row.user_cap as number
+  const overallWinners = Number(row.overall_winners ?? 0) || Math.max(1, Math.round(userCap * (row.win_rate_percent as number) / 100))
   const base: CampaignRow = {
     id,
     businessId: row.business_id as string,
@@ -379,10 +387,11 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
     status: row.status as string,
     startDate: row.start_date as string,
     endDate: row.end_date as string,
-    userCap: row.user_cap as number,
+    userCap,
     perDayUserLimit: row.per_day_user_limit as number,
     playsPerDay: row.plays_per_day as number,
-    winRatePercent: row.win_rate_percent as number,
+    overallWinners,
+    winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : 0,
     pin: (row.pin as string) ?? null,
     pinExpiresAt: (row.pin_expires_at as string) ?? null,
     configJson: (row.config_json as string) ?? null,
@@ -402,6 +411,10 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
 }
 
 async function createShakeCampaign(userId: string, payload: CreateShakeCampaignPayload) {
+  if (payload.overallWinners > payload.userCap) {
+    throw new Error('OVERALL_WINNERS_EXCEEDS_USER_CAP')
+  }
+
   const shareTotal = payload.rewards.reduce((s, r) => s + r.sharePercent, 0)
   if (shareTotal !== 100) {
     throw new Error('REWARD_SHARES_MUST_SUM_100')
@@ -415,19 +428,22 @@ async function createShakeCampaign(userId: string, payload: CreateShakeCampaignP
     payload.startDate === payload.endDate
       ? payload.userCap
       : Math.min(payload.perDayUserLimit, payload.userCap)
+  const winRatePercent = Math.round((payload.overallWinners / payload.userCap) * 100)
 
   const statements = [
     {
       sql: `INSERT INTO campaigns (
         id, business_id, name, mechanic, status, start_date, end_date,
         user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners,
         pin, pin_expires_at, claim_period_days
-      ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
+      ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
       args: [
         campaignId, businessId, payload.name, payload.mechanic,
         payload.startDate, payload.endDate,
         payload.userCap, perDayUserLimit, payload.playsPerDay,
-        payload.winRatePercent, pin, pinExpires,
+        winRatePercent, payload.overallWinners,
+        pin, pinExpires,
       ],
     },
     ...payload.rewards.map((r, i) => ({
@@ -639,9 +655,24 @@ async function updateShakeCampaign(
     fields.push('per_day_user_limit = ?')
     args.push(payload.perDayUserLimit)
   }
-  if (payload.winRatePercent !== undefined) {
+  if (payload.overallWinners !== undefined) {
+    fields.push('overall_winners = ?')
+    args.push(payload.overallWinners)
+    const userCapForRate = payload.userCap ?? existing.userCap
+    if (userCapForRate > 0) {
+      fields.push('win_rate_percent = ?')
+      args.push(Math.round((payload.overallWinners / userCapForRate) * 100))
+    }
+  } else if (payload.winRatePercent !== undefined) {
     fields.push('win_rate_percent = ?')
     args.push(payload.winRatePercent)
+    const userCapForRate = payload.userCap ?? existing.userCap
+    fields.push('overall_winners = ?')
+    args.push(Math.max(1, Math.round(userCapForRate * payload.winRatePercent / 100)))
+  }
+  if (payload.userCap !== undefined && payload.overallWinners === undefined && payload.winRatePercent === undefined) {
+    fields.push('win_rate_percent = ?')
+    args.push(Math.round((existing.overallWinners / payload.userCap) * 100))
   }
   if (payload.status !== undefined) {
     fields.push('status = ?')
@@ -1017,7 +1048,8 @@ export async function listBusinessesWithActiveCampaigns() {
     result.rows.map(async row => {
       const businessId = row.id as string
       const campaignsResult = await db.execute({
-        sql: `SELECT id, name, mechanic, start_date, end_date, win_rate_percent, plays_per_day,
+        sql: `SELECT id, name, mechanic, start_date, end_date, user_cap, per_day_user_limit,
+                     win_rate_percent, plays_per_day, overall_winners,
                      claim_period_days, cap_filled_at, config_json
               FROM campaigns
               WHERE business_id = ? AND status = 'active' AND start_date <= ?`,
@@ -1065,15 +1097,23 @@ export async function listBusinessesWithActiveCampaigns() {
         longitude: row.longitude != null ? Number(row.longitude) : null,
         displayDistanceKm: row.display_distance_km != null ? Number(row.display_distance_km) : null,
         mechanicTags: parsePhotoArray(row.mechanic_tags),
-        campaigns: campaigns.map(c => ({
-          id: c.id as string,
-          name: c.name as string,
-          mechanic: c.mechanic as string,
-          startDate: c.start_date as string,
-          endDate: c.end_date as string,
-          winRatePercent: c.win_rate_percent as number,
-          playsPerDay: c.plays_per_day as number,
-        })),
+        campaigns: campaigns.map(c => {
+          const userCap = c.user_cap as number
+          const winRate = c.win_rate_percent as number
+          const overallWinners = Number(c.overall_winners ?? 0)
+            || Math.max(1, Math.round(userCap * winRate / 100))
+          return {
+            id: c.id as string,
+            name: c.name as string,
+            mechanic: c.mechanic as string,
+            startDate: c.start_date as string,
+            endDate: c.end_date as string,
+            winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : winRate,
+            overallWinners,
+            userCap,
+            playsPerDay: c.plays_per_day as number,
+          }
+        }),
       }
     }),
   )
@@ -1165,6 +1205,7 @@ export async function getPublicCampaign(campaignId: string) {
     endDate: campaign.endDate,
     playsPerDay: campaign.playsPerDay,
     winRatePercent: campaign.winRatePercent,
+    overallWinners: campaign.overallWinners,
     rewards: campaign.rewards.map(r => ({
       id: r.id,
       name: r.name,
@@ -1285,6 +1326,7 @@ export async function getPlayState(campaignId: string, customerId: string) {
     message: eligibility.message,
     blockReason: eligibility.blockReason,
     winRatePercent: campaign.winRatePercent,
+    overallWinners: campaign.overallWinners,
   }
 }
 
@@ -1423,6 +1465,8 @@ async function fetchDailyWinContext(campaignId: string, customerId: string) {
        WHERE campaign_id = ? AND ${playedAtIst} = ?) AS unique_players,
       (SELECT COUNT(DISTINCT customer_id) FROM game_plays
        WHERE campaign_id = ? AND ${playedAtIst} = ? AND won = 1) AS winning_players_today,
+      (SELECT COUNT(DISTINCT customer_id) FROM game_plays
+       WHERE campaign_id = ? AND won = 1) AS total_winning_players,
       (SELECT COUNT(*) FROM game_plays
        WHERE campaign_id = ? AND customer_id = ? AND ${playedAtIst} = ?) AS customer_plays_today,
       (SELECT COUNT(*) FROM game_plays
@@ -1430,6 +1474,7 @@ async function fetchDailyWinContext(campaignId: string, customerId: string) {
     args: [
       campaignId, today,
       campaignId, today,
+      campaignId,
       campaignId, customerId, today,
       campaignId, customerId, today,
     ],
@@ -1437,7 +1482,8 @@ async function fetchDailyWinContext(campaignId: string, customerId: string) {
   const row = result.rows[0]!
   return {
     uniquePlayersBefore: Number(row.unique_players ?? 0),
-    winsBefore: Number(row.winning_players_today ?? 0),
+    winsBeforeToday: Number(row.winning_players_today ?? 0),
+    totalWinsBefore: Number(row.total_winning_players ?? 0),
     isFirstPlayToday: Number(row.customer_plays_today ?? 0) === 0,
     customerAlreadyWonToday: Number(row.customer_won_today ?? 0) > 0,
   }
@@ -1482,8 +1528,7 @@ export async function executeShakePlay(
   const dailyCtx = await fetchDailyWinContext(campaignId, customerId)
   const won = rollWinWithDailyQuota({
     ...dailyCtx,
-    winRatePercent: campaign.winRatePercent,
-    perDayUserLimit: campaign.perDayUserLimit,
+    overallWinners: campaign.overallWinners,
   })
   const playId = nanoid()
   const today = todayInCampaignTz()
