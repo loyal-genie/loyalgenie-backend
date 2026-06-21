@@ -42,6 +42,11 @@ function generateRedemptionCode(customerId: string): string {
   return `${prefix}-${suffix}`
 }
 
+function asInt(value: unknown, fallback = 0): number {
+  const n = Number(value)
+  return Number.isFinite(n) ? Math.trunc(n) : fallback
+}
+
 async function fetchLoyaltyCard(campaignId: string, customerId: string): Promise<LoyaltyCardRow | null> {
   const result = await db.execute({
     sql: `SELECT id, campaign_id, customer_id, loyalty_points, total_check_ins,
@@ -55,8 +60,8 @@ async function fetchLoyaltyCard(campaignId: string, customerId: string): Promise
     id: row.id as string,
     campaignId: row.campaign_id as string,
     customerId: row.customer_id as string,
-    loyaltyPoints: row.loyalty_points as number,
-    totalCheckIns: row.total_check_ins as number,
+    loyaltyPoints: asInt(row.loyalty_points),
+    totalCheckIns: asInt(row.total_check_ins),
     lastCheckInDate: (row.last_check_in_date as string) ?? null,
     status: row.status as 'active' | 'completed',
     enrolledAt: row.enrolled_at as string,
@@ -268,7 +273,7 @@ export async function listCustomerLoyaltyProfiles(customerId: string) {
     const campaignId = row.campaign_id as string
     const milestones = await fetchMilestoneRewards(campaignId)
     const awarded = await fetchAwardedRewardIds(row.id as string)
-    const points = row.loyalty_points as number
+    const points = asInt(row.loyalty_points)
 
     return {
       campaignId,
@@ -328,7 +333,7 @@ export async function executeCheckIn(
     throw new Error('ALREADY_CHECKED_IN_TODAY')
   }
 
-  const pointsEarned = config.pointsPerCheckIn
+  const pointsEarned = asInt(config.pointsPerCheckIn)
   const playId = nanoid()
 
   if (isNew) {

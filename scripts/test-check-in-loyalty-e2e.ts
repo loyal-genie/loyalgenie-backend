@@ -106,6 +106,19 @@ async function main() {
   const profiles = await listCustomerLoyaltyProfiles(customerId)
   assert('Loyalty profile shows points', profiles.length === 1 && profiles[0]!.loyaltyPoints === 10, `pts=${profiles[0]?.loyaltyPoints}`)
 
+  await db.execute({
+    sql: `UPDATE loyalty_cards SET last_check_in_date = '2000-01-01' WHERE campaign_id = ? AND customer_id = ?`,
+    args: [campaign.id, customerId],
+  })
+  const pinSecond = await getCampaignPinForBusiness(vendorId, campaign.id)
+  const verifySecond = await verifyCampaignPin(campaign.id, pinSecond.pin!, customerId)
+  const checkIn2 = await executeCheckIn(campaign.id, customerId, verifySecond.playSessionToken)
+  assert(
+    'Second check-in adds points (no string concat)',
+    checkIn2.pointsEarned === 10 && checkIn2.loyaltyPoints === 20,
+    `earned=${checkIn2.pointsEarned} total=${checkIn2.loyaltyPoints}`,
+  )
+
   try {
     const pin2 = await getCampaignPinForBusiness(vendorId, campaign.id)
     const v2 = await verifyCampaignPin(campaign.id, pin2.pin!, customerId)

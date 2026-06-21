@@ -10,7 +10,7 @@ export const loyaltyMilestoneSchema = z.object({
 })
 
 export const checkInLoyaltyConfigSchema = z.object({
-  pointsPerCheckIn: z.number().int().min(1).max(999),
+  pointsPerCheckIn: z.coerce.number().int().min(1).max(999),
 })
 
 export const createCheckInLoyaltyCampaignSchema = z.object({
