@@ -252,7 +252,32 @@ export async function migrate() {
   await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
   await migrateRewardRedemptionStatuses()
+  await migrateShakeWinRateToPlayerBased()
   console.log('Database migrations applied.')
+}
+
+/** Win rate was historically derived from total plays (cap × plays/day). Re-base on players only. */
+async function migrateShakeWinRateToPlayerBased() {
+  await runOptional(`CREATE TABLE IF NOT EXISTS schema_patches (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`)
+  const applied = await db.execute({
+    sql: 'SELECT 1 FROM schema_patches WHERE id = ?',
+    args: ['shake_win_rate_player_based_2026_06'],
+  })
+  if (applied.rows.length > 0) return
+
+  await db.execute(`
+    UPDATE campaigns
+    SET win_rate_percent = MIN(100, win_rate_percent * plays_per_day)
+    WHERE mechanic IN ('shake', 'spin', 'dice', 'lottery')
+      AND plays_per_day > 1
+  `)
+  await db.execute({
+    sql: 'INSERT INTO schema_patches (id) VALUES (?)',
+    args: ['shake_win_rate_player_based_2026_06'],
+  })
 }
 
 /** Backfill requested_at for rewards already in the vendor queue before the earned→pending flow. */

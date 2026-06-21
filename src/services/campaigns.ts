@@ -1421,17 +1421,25 @@ async function fetchDailyWinContext(campaignId: string, customerId: string) {
     sql: `SELECT
       (SELECT COUNT(DISTINCT customer_id) FROM game_plays
        WHERE campaign_id = ? AND ${playedAtIst} = ?) AS unique_players,
+      (SELECT COUNT(DISTINCT customer_id) FROM game_plays
+       WHERE campaign_id = ? AND ${playedAtIst} = ? AND won = 1) AS winning_players_today,
       (SELECT COUNT(*) FROM game_plays
-       WHERE campaign_id = ? AND ${playedAtIst} = ? AND won = 1) AS wins_today,
+       WHERE campaign_id = ? AND customer_id = ? AND ${playedAtIst} = ?) AS customer_plays_today,
       (SELECT COUNT(*) FROM game_plays
-       WHERE campaign_id = ? AND customer_id = ? AND ${playedAtIst} = ?) AS customer_plays_today`,
-    args: [campaignId, today, campaignId, today, campaignId, customerId, today],
+       WHERE campaign_id = ? AND customer_id = ? AND ${playedAtIst} = ? AND won = 1) AS customer_won_today`,
+    args: [
+      campaignId, today,
+      campaignId, today,
+      campaignId, customerId, today,
+      campaignId, customerId, today,
+    ],
   })
   const row = result.rows[0]!
   return {
     uniquePlayersBefore: Number(row.unique_players ?? 0),
-    winsBefore: Number(row.wins_today ?? 0),
+    winsBefore: Number(row.winning_players_today ?? 0),
     isFirstPlayToday: Number(row.customer_plays_today ?? 0) === 0,
+    customerAlreadyWonToday: Number(row.customer_won_today ?? 0) > 0,
   }
 }
 
