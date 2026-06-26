@@ -252,6 +252,7 @@ export async function migrate() {
     );
   `)
   await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
+  await runOptional('ALTER TABLE customer_users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 1')
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
   await migrateRewardRedemptionStatuses()
   await migrateShakeWinRateToPlayerBased()

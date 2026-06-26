@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import { db } from '../db/client.js'
 import { createBusinessUser, getBusinessForUser } from './auth.js'
 import { uniqueCafeSlug } from '../utils/slug.js'
+import { buildCustomerJoinUrl } from '../utils/frontend-url.js'
 
 const uploadArraySchema = z.array(z.string()).optional().default([])
 
@@ -67,7 +68,7 @@ export async function completeOnboarding(
 
   const businessId = nanoid()
   const qrSlug = await uniqueCafeSlug(payload.name)
-  const joinUrl = `${frontendBaseUrl.replace(/\/$/, '')}/${qrSlug}`
+  const joinUrl = buildCustomerJoinUrl(frontendBaseUrl, qrSlug)
 
   const branchName = payload.branchName || `${payload.name} — Main`
   const branchCity = payload.branchCity || payload.city

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import QRCode from 'qrcode'
 import { db } from '../db/client.js'
+import { buildCustomerJoinUrl } from '../utils/frontend-url.js'
 import { onboardingSchema } from './onboarding.js'
 
 export const businessUpdateSchema = onboardingSchema
@@ -185,7 +186,7 @@ export async function getBusinessQrForUser(userId: string, frontendBaseUrl: stri
   const profile = await getBusinessProfileForUser(userId)
   if (!profile) throw new Error('BUSINESS_NOT_FOUND')
 
-  const joinUrl = `${frontendBaseUrl.replace(/\/$/, '')}/${profile.qrSlug}`
+  const joinUrl = buildCustomerJoinUrl(frontendBaseUrl, profile.qrSlug)
   const qrCodeDataUrl = await QRCode.toDataURL(joinUrl, {
     margin: 2,
     width: 400,

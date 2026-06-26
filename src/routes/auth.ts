@@ -1,12 +1,14 @@
 import { Router } from 'express'
 import {
   createCustomerUser,
+  createMinimalCustomerUser,
   signInCustomerByPhone,
+  signInCustomerById,
   signToken,
-  signProfileCompletionToken,
   verifyProfileCompletionToken,
   verifyToken,
   getCustomerByPhone,
+  updateCustomerProfile,
   resolveBusinessUserByEmail,
   signInBusinessByEmail,
   registerBusinessUserAfterOtp,
@@ -40,6 +42,7 @@ router.get('/session', (req, res) => {
       role: user.role,
       name: user.name,
       phone: user.phone,
+      profileComplete: user.profileComplete !== false,
     },
   })
 })
@@ -66,7 +69,7 @@ const emailOtpLoginSchema = emailSchema.extend({
 })
 
 const customerCompleteProfileSchema = z.object({
-  profileToken: z.string().min(1),
+  profileToken: z.string().min(1).optional(),
   name: z.string().min(2, 'Name is required'),
   gender: z.enum(['male', 'female', 'other'], { message: 'Gender is required' }),
   dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth is required'),
@@ -235,12 +238,19 @@ router.post('/customer/otp-login', async (req, res) => {
       return res.json({ success: true, data: { ...result, isNewUser: false } })
     }
 
-    res.json({
+    const user = await createMinimalCustomerUser(storedPhone)
+    const token = signToken({ ...user, role: 'customer', profileComplete: false })
+    return res.json({
       success: true,
       data: {
+        token,
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        phone: user.phone,
+        role: 'customer' as const,
         isNewUser: true,
-        profileToken: signProfileCompletionToken(storedPhone),
-        phone: storedPhone,
+        profileComplete: false,
       },
     })
   } catch (err) {
@@ -266,18 +276,55 @@ router.post('/customer/complete-profile', async (req, res) => {
       })
     }
 
+    const authToken = bearerToken(req)
+    const authUser = authToken ? verifyToken(authToken, 'customer') : null
+    const email = parsed.data.email?.trim() || null
+
+    if (authUser) {
+      const existing = await getCustomerByPhone(authUser.phone ?? '')
+      if (existing?.profileComplete) {
+        const result = await signInCustomerById(authUser.id)
+        return res.json({ success: true, data: { ...result, isNewUser: false } })
+      }
+
+      const user = await updateCustomerProfile(
+        authUser.id,
+        parsed.data.name,
+        parsed.data.dateOfBirth,
+        parsed.data.gender,
+        email,
+      )
+      const result = await signInCustomerById(user.id)
+      return res.json({ success: true, data: { ...result, isNewUser: false } })
+    }
+
+    if (!parsed.data.profileToken) {
+      return res.status(401).json({ error: 'Authentication required' })
+    }
+
     const phone = verifyProfileCompletionToken(parsed.data.profileToken)
     if (!phone) {
       return res.status(401).json({ error: 'Session expired. Please verify your mobile number again.' })
     }
 
     const existing = await getCustomerByPhone(phone)
-    if (existing) {
+    if (existing?.profileComplete) {
       const result = await signInCustomerByPhone(phone)
       return res.json({ success: true, data: { ...result, isNewUser: false } })
     }
 
-    const email = parsed.data.email?.trim() || null
+    if (existing && !existing.profileComplete) {
+      const user = await updateCustomerProfile(
+        existing.id,
+        parsed.data.name,
+        parsed.data.dateOfBirth,
+        parsed.data.gender,
+        email,
+      )
+      const result = await signInCustomerById(user.id)
+      return res.json({ success: true, data: { ...result, isNewUser: false } })
+    }
+
     const user = await createCustomerUser(
       parsed.data.name,
       phone,
@@ -297,11 +344,12 @@ router.post('/customer/complete-profile', async (req, res) => {
         phone: user.phone,
         role: 'customer',
         isNewUser: true,
+        profileComplete: true,
       },
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'PROFILE_FAILED'
-    if (message === 'EMAIL_OR_PHONE_EXISTS') {
+    if (message === 'EMAIL_OR_PHONE_EXISTS' || message === 'EMAIL_EXISTS') {
       return res.status(409).json({ error: 'An account with this mobile number or email already exists' })
     }
     console.error('Customer complete profile error:', err)
