@@ -6,7 +6,7 @@ import {
   onboardingSchema,
 } from '../services/onboarding.js'
 import { signToken, verifyToken, getUserByEmail } from '../services/auth.js'
-import { getPrimaryFrontendUrl } from '../utils/frontend-url.js'
+import { buildCustomerJoinUrl, getPrimaryFrontendUrl } from '../utils/frontend-url.js'
 
 const router = Router()
 
@@ -68,7 +68,7 @@ router.get('/qr/:slug', async (req, res) => {
     const business = await getBusinessByQrSlug(req.params.slug)
     if (!business) return res.status(404).json({ error: 'Business not found' })
     const frontendBaseUrl = getPrimaryFrontendUrl()
-    const joinUrl = `${frontendBaseUrl.replace(/\/$/, '')}/${req.params.slug}`
+    const joinUrl = buildCustomerJoinUrl(frontendBaseUrl, req.params.slug)
     const QRCode = (await import('qrcode')).default
     const qrCodeDataUrl = await QRCode.toDataURL(joinUrl, {
       margin: 2,
