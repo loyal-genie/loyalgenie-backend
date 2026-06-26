@@ -46,21 +46,22 @@ export interface StampCampaignMeta {
   config: StampConfig
 }
 
-export function validateStampConfig(config: StampConfig): void {
-  const half = Math.floor(config.totalStamps / 2)
-  const [sFrom, sTo] = config.surpriseRange
-  const [bFrom, bTo] = config.bigRange
+function isStampRangeValid(from: number, to: number, totalStamps: number): boolean {
+  return from >= 1 && to <= totalStamps && from <= to
+}
 
-  if (config.prefillStamps >= config.totalStamps) {
+export function validateStampConfig(config: StampConfig): void {
+  const { totalStamps, prefillStamps, surpriseRange, bigRange } = config
+  const [sFrom, sTo] = surpriseRange
+  const [bFrom, bTo] = bigRange
+
+  if (prefillStamps < 0 || prefillStamps > totalStamps) {
     throw new Error('INVALID_STAMP_CONFIG')
   }
-  if (sFrom < 1 || sTo > half || sFrom > sTo) {
+  if (!isStampRangeValid(sFrom, sTo, totalStamps)) {
     throw new Error('INVALID_STAMP_CONFIG')
   }
-  if (bFrom < half + 1 || bTo > config.totalStamps || bFrom > bTo) {
-    throw new Error('INVALID_STAMP_CONFIG')
-  }
-  if (sTo >= bFrom) {
+  if (!isStampRangeValid(bFrom, bTo, totalStamps)) {
     throw new Error('INVALID_STAMP_CONFIG')
   }
 }

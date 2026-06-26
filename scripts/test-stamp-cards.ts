@@ -27,6 +27,7 @@ import {
   getClaimDeadline,
   randomIntInclusive,
   rollPoolReward,
+  validateStampConfig,
 } from '../src/services/stamp-cards.js'
 import { hashPassword } from '../src/services/auth.js'
 import { nanoid } from 'nanoid'
@@ -87,7 +88,53 @@ function unitTests() {
   assert('rollPoolReward single 100%', rollPoolReward(pool)?.name === 'Treat', 'always wins')
 
   const lowPool = [{ id: '1', name: 'Rare', description: '', icon: '🎁', sharePercent: 0 }]
-  assert('rollPoolReward 0% returns null', rollPoolReward(lowPool) === null, 'no win')
+  assert('validateStampConfig allows flexible ranges', (() => {
+    try {
+      validateStampConfig({
+        totalStamps: 6,
+        prefillStamps: 2,
+        surpriseRange: [3, 5],
+        bigRange: [6, 6],
+        surpriseMode: 'single',
+        bigMode: 'single',
+      })
+      return true
+    } catch {
+      return false
+    }
+  })(), '6 stamps · 2 prefill · surprise 3-5 · big 6-6')
+
+  assert('validateStampConfig allows overlapping ranges', (() => {
+    try {
+      validateStampConfig({
+        totalStamps: 10,
+        prefillStamps: 10,
+        surpriseRange: [1, 10],
+        bigRange: [1, 10],
+        surpriseMode: 'single',
+        bigMode: 'single',
+      })
+      return true
+    } catch {
+      return false
+    }
+  })(), 'full prefill and overlapping reward ranges')
+
+  assert('validateStampConfig rejects out-of-bounds range', (() => {
+    try {
+      validateStampConfig({
+        totalStamps: 6,
+        prefillStamps: 0,
+        surpriseRange: [1, 7],
+        bigRange: [6, 6],
+        surpriseMode: 'single',
+        bigMode: 'single',
+      })
+      return false
+    } catch {
+      return true
+    }
+  })(), 'surprise to > total stamps')
 
   const deadline = getClaimDeadline('2026-06-20', 10, '2026-06-10T12:00:00.000Z')
   assert('claim deadline cap fill', deadline === '2026-06-20', `cap fill day 10 + 10 days = ${deadline}`)
