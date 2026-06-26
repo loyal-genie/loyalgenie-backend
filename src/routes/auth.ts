@@ -1,18 +1,19 @@
 import { Router } from 'express'
 import {
-  createCustomerUser,
-  createMinimalCustomerUser,
   signInCustomerByPhone,
-  signInCustomerById,
   signToken,
+  signProfileCompletionToken,
   verifyProfileCompletionToken,
   verifyToken,
   getCustomerByPhone,
-  updateCustomerProfile,
   resolveBusinessUserByEmail,
   signInBusinessByEmail,
   registerBusinessUserAfterOtp,
 } from '../services/auth.js'
+import {
+  createCustomerWithNameOnly,
+  getCustomerById,
+} from '../services/customer.js'
 import { sendOtp, verifyOtp, sendEmailOtp, verifyEmailOtp } from '../services/msg91.js'
 import { toStoredPhone } from '../services/phone.js'
 import { z } from 'zod'
@@ -25,7 +26,7 @@ function bearerToken(req: import('express').Request): string | null {
   return header.slice(7)
 }
 
-router.get('/session', (req, res) => {
+router.get('/session', async (req, res) => {
   const token = bearerToken(req)
   if (!token) {
     return res.status(401).json({ error: 'Authentication required' })
@@ -34,6 +35,13 @@ router.get('/session', (req, res) => {
   if (!user) {
     return res.status(401).json({ error: 'Invalid or expired token' })
   }
+
+  let profileComplete = true
+  if (user.role === 'customer') {
+    const profile = await getCustomerById(user.id)
+    profileComplete = profile?.profileComplete ?? true
+  }
+
   res.json({
     success: true,
     data: {
@@ -42,7 +50,7 @@ router.get('/session', (req, res) => {
       role: user.role,
       name: user.name,
       phone: user.phone,
-      profileComplete: user.profileComplete !== false,
+      profileComplete,
     },
   })
 })
@@ -69,11 +77,8 @@ const emailOtpLoginSchema = emailSchema.extend({
 })
 
 const customerCompleteProfileSchema = z.object({
-  profileToken: z.string().min(1).optional(),
+  profileToken: z.string().min(1),
   name: z.string().min(2, 'Name is required'),
-  gender: z.enum(['male', 'female', 'other'], { message: 'Gender is required' }),
-  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth is required'),
-  email: z.string().email().optional().or(z.literal('')),
 })
 
 const otpVerifySchema = phoneSchema.extend({
@@ -238,19 +243,12 @@ router.post('/customer/otp-login', async (req, res) => {
       return res.json({ success: true, data: { ...result, isNewUser: false } })
     }
 
-    const user = await createMinimalCustomerUser(storedPhone)
-    const token = signToken({ ...user, role: 'customer', profileComplete: false })
-    return res.json({
+    res.json({
       success: true,
       data: {
-        token,
-        userId: user.id,
-        email: user.email,
-        name: user.name,
-        phone: user.phone,
-        role: 'customer' as const,
         isNewUser: true,
-        profileComplete: false,
+        profileToken: signProfileCompletionToken(storedPhone),
+        phone: storedPhone,
       },
     })
   } catch (err) {
@@ -276,63 +274,25 @@ router.post('/customer/complete-profile', async (req, res) => {
       })
     }
 
-    const authToken = bearerToken(req)
-    const authUser = authToken ? verifyToken(authToken, 'customer') : null
-    const email = parsed.data.email?.trim() || null
-
-    if (authUser) {
-      const existing = await getCustomerByPhone(authUser.phone ?? '')
-      if (existing?.profileComplete) {
-        const result = await signInCustomerById(authUser.id)
-        return res.json({ success: true, data: { ...result, isNewUser: false } })
-      }
-
-      const user = await updateCustomerProfile(
-        authUser.id,
-        parsed.data.name,
-        parsed.data.dateOfBirth,
-        parsed.data.gender,
-        email,
-      )
-      const result = await signInCustomerById(user.id)
-      return res.json({ success: true, data: { ...result, isNewUser: false } })
-    }
-
-    if (!parsed.data.profileToken) {
-      return res.status(401).json({ error: 'Authentication required' })
-    }
-
     const phone = verifyProfileCompletionToken(parsed.data.profileToken)
     if (!phone) {
       return res.status(401).json({ error: 'Session expired. Please verify your mobile number again.' })
     }
 
     const existing = await getCustomerByPhone(phone)
-    if (existing?.profileComplete) {
+    if (existing) {
       const result = await signInCustomerByPhone(phone)
       return res.json({ success: true, data: { ...result, isNewUser: false } })
     }
 
-    if (existing && !existing.profileComplete) {
-      const user = await updateCustomerProfile(
-        existing.id,
-        parsed.data.name,
-        parsed.data.dateOfBirth,
-        parsed.data.gender,
-        email,
-      )
-      const result = await signInCustomerById(user.id)
-      return res.json({ success: true, data: { ...result, isNewUser: false } })
-    }
-
-    const user = await createCustomerUser(
-      parsed.data.name,
-      phone,
-      parsed.data.dateOfBirth,
-      parsed.data.gender,
-      email,
-    )
-    const token = signToken({ ...user, role: 'customer' })
+    const user = await createCustomerWithNameOnly(parsed.data.name, phone)
+    const token = signToken({
+      id: user.id,
+      email: user.email,
+      role: 'customer',
+      name: user.name,
+      phone: user.phone,
+    })
 
     res.status(201).json({
       success: true,
@@ -344,7 +304,7 @@ router.post('/customer/complete-profile', async (req, res) => {
         phone: user.phone,
         role: 'customer',
         isNewUser: true,
-        profileComplete: true,
+        profileComplete: user.profileComplete,
       },
     })
   } catch (err) {

@@ -7,6 +7,7 @@ import onboardingRoutes from './routes/onboarding.js'
 import authRoutes from './routes/auth.js'
 import businessRoutes from './routes/business.js'
 import campaignRoutes from './routes/campaigns.js'
+import customerRoutes from './routes/customer.js'
 import { normalizeFrontendOrigin, parseFrontendOrigins } from './utils/frontend-url.js'
 
 dotenv.config()
@@ -119,6 +120,7 @@ app.use('/api/onboarding', onboardingRoutes)
 app.use('/api/auth', authRoutes)
 app.use('/api/business', businessRoutes)
 app.use('/api/campaigns', campaignRoutes)
+app.use('/api/customer', customerRoutes)
 
 async function start() {
   await migrate()

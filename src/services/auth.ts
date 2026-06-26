@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken'
 import { nanoid } from 'nanoid'
 import { db } from '../db/client.js'
 import { toStoredPhone, formatPhoneLocal } from './phone.js'
+import { getCustomerById } from './customer.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 const JWT_EXPIRES = '30d'
@@ -12,19 +13,11 @@ export interface AuthUser {
   role: 'business' | 'customer'
   name?: string
   phone?: string
-  profileComplete?: boolean
 }
 
 export function signToken(user: AuthUser) {
   return jwt.sign(
-    {
-      sub: user.id,
-      email: user.email,
-      type: user.role,
-      name: user.name,
-      phone: user.phone,
-      profileComplete: user.profileComplete !== false,
-    },
+    { sub: user.id, email: user.email, type: user.role, name: user.name, phone: user.phone },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES },
   )
@@ -38,7 +31,6 @@ export function verifyToken(token: string, expectedRole?: 'business' | 'customer
       type: string
       name?: string
       phone?: string
-      profileComplete?: boolean
     }
     const role = payload.type === 'customer' ? 'customer' : 'business'
     if (expectedRole && role !== expectedRole) return null
@@ -48,7 +40,6 @@ export function verifyToken(token: string, expectedRole?: 'business' | 'customer
       role,
       name: payload.name,
       phone: payload.phone,
-      profileComplete: payload.profileComplete !== false,
     }
   } catch {
     return null
@@ -171,7 +162,7 @@ export async function getCustomerByPhone(phone: string) {
 
   for (const candidate of [...new Set(candidates)]) {
     const result = await db.execute({
-      sql: 'SELECT id, name, phone, email, date_of_birth, gender, profile_complete FROM customer_users WHERE phone = ?',
+      sql: 'SELECT id, name, phone, email, date_of_birth, gender FROM customer_users WHERE phone = ?',
       args: [candidate],
     })
     const row = result.rows[0]
@@ -183,117 +174,18 @@ export async function getCustomerByPhone(phone: string) {
         email: (row.email as string | null) ?? '',
         dateOfBirth: (row.date_of_birth as string | null) ?? undefined,
         gender: (row.gender as string | null) ?? undefined,
-        profileComplete: row.profile_complete !== 0,
       }
     }
   }
   return null
 }
 
-export async function getCustomerById(id: string) {
-  const result = await db.execute({
-    sql: 'SELECT id, name, phone, email, date_of_birth, gender, profile_complete FROM customer_users WHERE id = ?',
-    args: [id],
-  })
-  const row = result.rows[0]
-  if (!row) return null
-  return {
-    id: row.id as string,
-    name: row.name as string,
-    phone: row.phone as string,
-    email: (row.email as string | null) ?? '',
-    dateOfBirth: (row.date_of_birth as string | null) ?? undefined,
-    gender: (row.gender as string | null) ?? undefined,
-    profileComplete: row.profile_complete !== 0,
-  }
-}
-
-export async function createMinimalCustomerUser(phone: string) {
-  const existing = await db.execute({
-    sql: 'SELECT id FROM customer_users WHERE phone = ?',
-    args: [phone],
-  })
-  if (existing.rows.length > 0) throw new Error('PHONE_EXISTS')
-
-  const id = nanoid()
-  await db.execute({
-    sql: `INSERT INTO customer_users (id, name, phone, email, password_hash, date_of_birth, gender, phone_verified, profile_complete)
-          VALUES (?, '', ?, NULL, NULL, NULL, NULL, 1, 0)`,
-    args: [id, phone],
-  })
-  return {
-    id,
-    name: '',
-    phone,
-    email: '',
-    profileComplete: false,
-  }
-}
-
-export async function updateCustomerProfile(
-  userId: string,
-  name: string,
-  dateOfBirth: string,
-  gender: string,
-  email?: string | null,
-) {
-  const normalizedEmail = email?.trim().toLowerCase() || null
-  if (normalizedEmail) {
-    const emailTaken = await db.execute({
-      sql: 'SELECT id FROM customer_users WHERE email = ? AND id != ?',
-      args: [normalizedEmail, userId],
-    })
-    if (emailTaken.rows.length > 0) throw new Error('EMAIL_EXISTS')
-  }
-
-  await db.execute({
-    sql: `UPDATE customer_users
-          SET name = ?, date_of_birth = ?, gender = ?, email = ?, profile_complete = 1
-          WHERE id = ?`,
-    args: [name.trim(), dateOfBirth, gender, normalizedEmail, userId],
-  })
-
-  const user = await getCustomerById(userId)
-  if (!user) throw new Error('USER_NOT_FOUND')
-  return user
-}
-
-export async function createCustomerUser(
-  name: string,
-  phone: string,
-  dateOfBirth: string,
-  gender: string,
-  email?: string | null,
-) {
-  const normalizedEmail = email?.trim().toLowerCase() || null
-  const existing = await db.execute({
-    sql: 'SELECT id FROM customer_users WHERE phone = ? OR (email IS NOT NULL AND email = ?)',
-    args: [phone, normalizedEmail ?? ''],
-  })
-  if (existing.rows.length > 0) throw new Error('EMAIL_OR_PHONE_EXISTS')
-
-  const id = nanoid()
-  await db.execute({
-    sql: `INSERT INTO customer_users (id, name, phone, email, password_hash, date_of_birth, gender, phone_verified, profile_complete)
-          VALUES (?, ?, ?, ?, NULL, ?, ?, 1, 1)`,
-    args: [id, name.trim(), phone, normalizedEmail, dateOfBirth, gender],
-  })
-  return {
-    id,
-    name: name.trim(),
-    phone,
-    email: normalizedEmail ?? '',
-    dateOfBirth,
-    gender,
-    profileComplete: true,
-  }
-}
-
 export async function signInCustomerByPhone(phone: string) {
   const user = await getCustomerByPhone(phone)
   if (!user) throw new Error('PHONE_NOT_FOUND')
 
-  const token = signToken({ ...user, role: 'customer', profileComplete: user.profileComplete })
+  const profile = await getCustomerById(user.id)
+  const token = signToken({ ...user, role: 'customer' })
 
   return {
     token,
@@ -302,24 +194,7 @@ export async function signInCustomerByPhone(phone: string) {
     name: user.name,
     phone: user.phone,
     role: 'customer' as const,
-    profileComplete: user.profileComplete,
-  }
-}
-
-export async function signInCustomerById(userId: string) {
-  const user = await getCustomerById(userId)
-  if (!user) throw new Error('USER_NOT_FOUND')
-
-  const token = signToken({ ...user, role: 'customer', profileComplete: user.profileComplete })
-
-  return {
-    token,
-    userId: user.id,
-    email: user.email,
-    name: user.name,
-    phone: user.phone,
-    role: 'customer' as const,
-    profileComplete: user.profileComplete,
+    profileComplete: profile?.profileComplete ?? true,
   }
 }
 
