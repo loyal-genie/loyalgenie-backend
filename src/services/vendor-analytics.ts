@@ -97,11 +97,18 @@ export interface VendorDashboardStats {
 }
 
 const DASHBOARD_CACHE_TTL_MS = Number(process.env.VENDOR_DASHBOARD_CACHE_MS ?? 30_000)
+const CUSTOMERS_CACHE_TTL_MS = Number(process.env.VENDOR_CUSTOMERS_CACHE_MS ?? 60_000)
 const dashboardCache = new TtlCache<VendorDashboardStats>(DASHBOARD_CACHE_TTL_MS)
+const customersCache = new TtlCache<VendorCustomerSummary[]>(CUSTOMERS_CACHE_TTL_MS)
 
 export function invalidateVendorDashboardCache(businessId?: string): void {
   if (businessId) dashboardCache.delete(businessId)
   else dashboardCache.clear()
+}
+
+export function invalidateVendorCustomersCache(businessId?: string): void {
+  if (businessId) customersCache.delete(businessId)
+  else customersCache.clear()
 }
 
 function mapCustomerRow(row: Record<string, unknown>): VendorCustomerSummary {
@@ -144,8 +151,10 @@ async function syncParticipationsFromGamePlays(businessId: string) {
     args: [businessId],
   })
 
-  for (const row of orphaned.rows) {
-    await db.execute({
+  if (orphaned.rows.length === 0) return
+
+  await db.batch(
+    orphaned.rows.map(row => ({
       sql: `INSERT INTO campaign_participations
             (id, campaign_id, customer_id, plays_today, last_play_date, total_plays, first_played_at, last_played_at)
             VALUES (?, ?, ?, 1, ?, ?, ?, ?)`,
@@ -158,8 +167,8 @@ async function syncParticipationsFromGamePlays(businessId: string) {
         row.first_played as string,
         row.last_played as string,
       ],
-    })
-  }
+    })),
+  )
 }
 
 async function fetchCustomerSummaries(businessId: string): Promise<VendorCustomerSummary[]> {
@@ -178,28 +187,40 @@ async function fetchCustomerSummaries(businessId: string): Promise<VendorCustome
         COUNT(gp.id) AS total_visits,
         COUNT(gp.id) AS games_played,
         SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END) AS rewards_earned,
-        (
-          SELECT COUNT(*)
-          FROM customer_rewards cr2
-          INNER JOIN campaigns c2 ON c2.id = cr2.campaign_id AND c2.business_id = ?
-          WHERE cr2.customer_id = cu.id AND cr2.status = 'redeemed'
-        ) AS redeemed_count,
-        (
-          SELECT COALESCE(SUM(lc.loyalty_points), 0)
-          FROM loyalty_cards lc
-          INNER JOIN campaigns c3 ON c3.id = lc.campaign_id AND c3.business_id = ?
-          WHERE lc.customer_id = cu.id
-        ) AS total_loyalty_points
+        COALESCE(cr_agg.redeemed_count, 0) AS redeemed_count,
+        COALESCE(lc_agg.total_loyalty_points, 0) AS total_loyalty_points
       FROM game_plays gp
       INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
       INNER JOIN customer_users cu ON cu.id = gp.customer_id
-      GROUP BY cu.id
+      LEFT JOIN (
+        SELECT cr.customer_id, COUNT(*) AS redeemed_count
+        FROM customer_rewards cr
+        INNER JOIN campaigns c2 ON c2.id = cr.campaign_id AND c2.business_id = ?
+        WHERE cr.status = 'redeemed'
+        GROUP BY cr.customer_id
+      ) cr_agg ON cr_agg.customer_id = cu.id
+      LEFT JOIN (
+        SELECT lc.customer_id, SUM(lc.loyalty_points) AS total_loyalty_points
+        FROM loyalty_cards lc
+        INNER JOIN campaigns c3 ON c3.id = lc.campaign_id AND c3.business_id = ?
+        GROUP BY lc.customer_id
+      ) lc_agg ON lc_agg.customer_id = cu.id
+      GROUP BY cu.id, cu.name, cu.phone, cu.email, cu.created_at,
+               cr_agg.redeemed_count, lc_agg.total_loyalty_points
       ORDER BY last_visit DESC
     `,
     args: [businessId, businessId, businessId],
   })
 
   return result.rows.map(row => mapCustomerRow(row as Record<string, unknown>))
+}
+
+async function getCustomerSummariesCached(businessId: string): Promise<VendorCustomerSummary[]> {
+  const cached = customersCache.get(businessId)
+  if (cached) return cached
+  const customers = await fetchCustomerSummaries(businessId)
+  customersCache.set(businessId, customers)
+  return customers
 }
 
 function computeSegment(c: VendorCustomerSummary): 'loyalist' | 'regular' | 'at-risk' | 'inactive' {
@@ -222,7 +243,7 @@ export async function getVendorDashboardStats(userId: string): Promise<VendorDas
 }
 
 async function computeVendorDashboardStats(businessId: string): Promise<VendorDashboardStats> {
-  const customers = await fetchCustomerSummaries(businessId)
+  const customers = await getCustomerSummariesCached(businessId)
 
   const segmentCounts = { loyalist: 0, regular: 0, atRisk: 0, inactive: 0 }
   for (const c of customers) {
@@ -242,22 +263,53 @@ async function computeVendorDashboardStats(businessId: string): Promise<VendorDa
     ? Math.round((repeatCustomers / customers.length) * 100)
     : 0
 
-  const playsResult = await db.execute({
-    sql: `
-      SELECT
-        COUNT(*) AS total_plays,
-        SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END) AS total_wins,
-        SUM(CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS plays_last_30d,
-        COUNT(DISTINCT CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN gp.customer_id END) AS customers_last_30d,
-        COUNT(DISTINCT CASE
-          WHEN (gp.played_at)::timestamptz >= datetime('now', '-60 days')
-           AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
-          THEN gp.customer_id END) AS customers_prior_30d
-      FROM game_plays gp
-      INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
-    `,
-    args: [businessId],
-  })
+  const [playsResult, returningResult, pendingResult] = await Promise.all([
+    db.execute({
+      sql: `
+        SELECT
+          COUNT(*) AS total_plays,
+          SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END) AS total_wins,
+          SUM(CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS plays_last_30d,
+          COUNT(DISTINCT CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN gp.customer_id END) AS customers_last_30d,
+          COUNT(DISTINCT CASE
+            WHEN (gp.played_at)::timestamptz >= datetime('now', '-60 days')
+             AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
+            THEN gp.customer_id END) AS customers_prior_30d
+        FROM game_plays gp
+        INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
+      `,
+      args: [businessId],
+    }),
+    db.execute({
+      sql: `
+        SELECT COUNT(DISTINCT recent.customer_id) AS cnt
+        FROM (
+          SELECT DISTINCT gp.customer_id
+          FROM game_plays gp
+          INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
+          WHERE (gp.played_at)::timestamptz >= datetime('now', '-30 days')
+        ) recent
+        INNER JOIN (
+          SELECT DISTINCT gp.customer_id
+          FROM game_plays gp
+          INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
+          WHERE (gp.played_at)::timestamptz >= datetime('now', '-60 days')
+            AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
+        ) prior ON prior.customer_id = recent.customer_id
+      `,
+      args: [businessId, businessId],
+    }),
+    db.execute({
+      sql: `
+        SELECT
+          SUM(CASE WHEN cr.status = 'pending' THEN 1 ELSE 0 END) AS pending_cnt,
+          SUM(CASE WHEN cr.status = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_cnt
+        FROM customer_rewards cr
+        INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
+      `,
+      args: [businessId],
+    }),
+  ])
 
   const playRow = playsResult.rows[0] ?? {}
   const totalPlays = Number(playRow.total_plays ?? 0)
@@ -265,44 +317,13 @@ async function computeVendorDashboardStats(businessId: string): Promise<VendorDa
   const playsLast30d = Number(playRow.plays_last_30d ?? 0)
   const customersLast30d = Number(playRow.customers_last_30d ?? 0)
   const customersPrior30d = Number(playRow.customers_prior_30d ?? 0)
-
-  const returningResult = await db.execute({
-    sql: `
-      SELECT COUNT(DISTINCT recent.customer_id) AS cnt
-      FROM (
-        SELECT DISTINCT gp.customer_id
-        FROM game_plays gp
-        INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
-        WHERE (gp.played_at)::timestamptz >= datetime('now', '-30 days')
-      ) recent
-      INNER JOIN (
-        SELECT DISTINCT gp.customer_id
-        FROM game_plays gp
-        INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
-        WHERE (gp.played_at)::timestamptz >= datetime('now', '-60 days')
-          AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
-      ) prior ON prior.customer_id = recent.customer_id
-    `,
-    args: [businessId, businessId],
-  })
   const returningCustomers30d = Number(returningResult.rows[0]?.cnt ?? 0)
+  const pendingRedemptions = Number(pendingResult.rows[0]?.pending_cnt ?? 0)
+  const totalRedeemed = Number(pendingResult.rows[0]?.redeemed_cnt ?? 0)
 
   const retentionRate = customersPrior30d > 0
     ? Math.round((returningCustomers30d / customersPrior30d) * 100)
     : customersLast30d > 0 ? 100 : 0
-
-  const pendingResult = await db.execute({
-    sql: `
-      SELECT
-        SUM(CASE WHEN cr.status = 'pending' THEN 1 ELSE 0 END) AS pending_cnt,
-        SUM(CASE WHEN cr.status = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_cnt
-      FROM customer_rewards cr
-      INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
-    `,
-    args: [businessId],
-  })
-  const pendingRedemptions = Number(pendingResult.rows[0]?.pending_cnt ?? 0)
-  const totalRedeemed = Number(pendingResult.rows[0]?.redeemed_cnt ?? 0)
 
   const atRiskCustomers = customers
     .filter(c => {
@@ -329,12 +350,12 @@ async function computeVendorDashboardStats(businessId: string): Promise<VendorDa
 
 export async function listVendorCustomers(userId: string): Promise<VendorCustomerSummary[]> {
   const businessId = await getBusinessIdForUser(userId)
-  return fetchCustomerSummaries(businessId)
+  return getCustomerSummariesCached(businessId)
 }
 
 export async function getVendorCustomer(userId: string, customerId: string): Promise<VendorCustomerDetail> {
   const businessId = await getBusinessIdForUser(userId)
-  const customers = await fetchCustomerSummaries(businessId)
+  const customers = await getCustomerSummariesCached(businessId)
   const summary = customers.find(c => c.id === customerId)
   if (!summary) throw new Error('CUSTOMER_NOT_FOUND')
 
@@ -461,4 +482,5 @@ export async function markRedemptionRedeemed(userId: string, rewardId: string) {
   })
 
   invalidateVendorDashboardCache(businessId)
+  invalidateVendorCustomersCache(businessId)
 }

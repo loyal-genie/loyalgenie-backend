@@ -70,22 +70,40 @@ async function fetchLoyaltyCard(campaignId: string, customerId: string): Promise
 }
 
 export async function fetchMilestoneRewards(campaignId: string): Promise<(CampaignReward & { pointsThreshold: number })[]> {
+  const batch = await fetchMilestoneRewardsBatch([campaignId])
+  return batch.get(campaignId) ?? []
+}
+
+export async function fetchMilestoneRewardsBatch(
+  campaignIds: string[],
+): Promise<Map<string, (CampaignReward & { pointsThreshold: number })[]>> {
+  const map = new Map<string, (CampaignReward & { pointsThreshold: number })[]>()
+  if (campaignIds.length === 0) return map
+  for (const id of campaignIds) map.set(id, [])
+
+  const placeholders = campaignIds.map(() => '?').join(', ')
   const result = await db.execute({
-    sql: `SELECT id, name, description, icon, share_percent, reward_tier
+    sql: `SELECT campaign_id, id, name, description, icon, share_percent, reward_tier
           FROM campaign_rewards
-          WHERE campaign_id = ? AND reward_tier = 'milestone'
-          ORDER BY share_percent ASC`,
-    args: [campaignId],
+          WHERE campaign_id IN (${placeholders}) AND reward_tier = 'milestone'
+          ORDER BY campaign_id ASC, share_percent ASC`,
+    args: campaignIds,
   })
-  return result.rows.map(row => ({
-    id: row.id as string,
-    name: row.name as string,
-    description: (row.description as string) ?? '',
-    icon: (row.icon as string) ?? '🎁',
-    sharePercent: row.share_percent as number,
-    rewardTier: row.reward_tier as string,
-    pointsThreshold: row.share_percent as number,
-  }))
+
+  for (const row of result.rows) {
+    const campaignId = row.campaign_id as string
+    map.get(campaignId)!.push({
+      id: row.id as string,
+      name: row.name as string,
+      description: (row.description as string) ?? '',
+      icon: (row.icon as string) ?? '🎁',
+      sharePercent: row.share_percent as number,
+      rewardTier: row.reward_tier as string,
+      pointsThreshold: row.share_percent as number,
+    })
+  }
+
+  return map
 }
 
 export async function fetchAwardedRewardIds(loyaltyCardId: string): Promise<Set<string>> {

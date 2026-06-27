@@ -252,15 +252,28 @@ async function evaluateTriggers(
 }
 
 export async function expireStaleCards(campaignId: string, claimDeadline: string, today: string): Promise<void> {
-  if (today <= claimDeadline) return
+  await expireStaleStampCampaigns([{ campaignId, claimDeadline }], today)
+}
+
+/** Batch-expire stamp cards past claim deadline (one UPDATE per table). */
+export async function expireStaleStampCampaigns(
+  entries: { campaignId: string; claimDeadline: string }[],
+  today: string,
+): Promise<void> {
+  const expiredIds = entries
+    .filter(e => e.claimDeadline && today > e.claimDeadline)
+    .map(e => e.campaignId)
+  if (expiredIds.length === 0) return
+
+  const placeholders = expiredIds.map(() => '?').join(', ')
   await db.execute({
     sql: `UPDATE stamp_cards SET status = 'expired', expired_at = datetime('now')
-          WHERE campaign_id = ? AND status = 'active'`,
-    args: [campaignId],
+          WHERE campaign_id IN (${placeholders}) AND status = 'active'`,
+    args: expiredIds,
   })
   await db.execute({
-    sql: `UPDATE campaigns SET status = 'ended' WHERE id = ? AND status = 'active'`,
-    args: [campaignId],
+    sql: `UPDATE campaigns SET status = 'ended' WHERE id IN (${placeholders}) AND status = 'active'`,
+    args: expiredIds,
   })
 }
 

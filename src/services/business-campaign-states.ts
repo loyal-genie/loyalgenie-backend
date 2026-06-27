@@ -10,11 +10,11 @@ import {
   isEnrollmentOpen,
   getClaimDeadline,
   getEnrollmentCloseDate,
-  expireStaleCards,
+  expireStaleStampCampaigns,
 } from './stamp-cards.js'
 import {
   parseCheckInConfig,
-  fetchMilestoneRewards,
+  fetchMilestoneRewardsBatch,
 } from './check-in-loyalty.js'
 
 export interface BusinessCampaignStateItem {
@@ -59,7 +59,7 @@ export async function getBusinessCampaignStates(
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
@@ -81,7 +81,37 @@ export async function getBusinessCampaignStates(
     loyaltyIds.length > 0
       ? db.execute({ sql: 'SELECT name FROM businesses WHERE id = ?', args: [businessId] })
       : Promise.resolve({ rows: [] }),
+    fetchMilestoneRewardsBatch(loyaltyIds),
+    loyaltyIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id, reward_name, status FROM customer_rewards
+                WHERE customer_id = ? AND campaign_id IN (${loyaltyIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...loyaltyIds],
+        })
+      : Promise.resolve({ rows: [] }),
   ])
+
+  const stampExpireEntries = rows
+    .filter(r => r.mechanic === 'stamp')
+    .map(r => {
+      const meta = parseStampCampaignMeta({
+        config_json: r.config_json,
+        claim_period_days: r.claim_period_days,
+        cap_filled_at: r.cap_filled_at,
+      })
+      if (!meta) return null
+      return {
+        campaignId: r.id as string,
+        claimDeadline: getClaimDeadline(
+          r.end_date as string,
+          meta.claimPeriodDays,
+          meta.capFilledAt,
+        ),
+      }
+    })
+    .filter((e): e is { campaignId: string; claimDeadline: string } => e !== null)
+
+  await expireStaleStampCampaigns(stampExpireEntries, today)
 
   const partMap = new Map(
     participations.rows.map(r => [r.campaign_id as string, r as Record<string, unknown>]),
@@ -94,26 +124,12 @@ export async function getBusinessCampaignStates(
   )
   const businessName = (businessRow.rows[0]?.name as string) ?? 'Business'
 
-  const milestoneMap = new Map<string, Awaited<ReturnType<typeof fetchMilestoneRewards>>>()
-  await Promise.all(
-    loyaltyIds.map(async id => {
-      milestoneMap.set(id, await fetchMilestoneRewards(id))
-    }),
-  )
-
   const loyaltyRedeemedMap = new Map<string, Set<string>>()
-  if (loyaltyIds.length > 0) {
-    const redeemed = await db.execute({
-      sql: `SELECT campaign_id, reward_name, status FROM customer_rewards
-            WHERE customer_id = ? AND campaign_id IN (${loyaltyIds.map(() => '?').join(', ')})`,
-      args: [customerId, ...loyaltyIds],
-    })
-    for (const row of redeemed.rows) {
-      const cid = row.campaign_id as string
-      if (!loyaltyRedeemedMap.has(cid)) loyaltyRedeemedMap.set(cid, new Set())
-      if (row.status === 'redeemed') {
-        loyaltyRedeemedMap.get(cid)!.add(row.reward_name as string)
-      }
+  for (const row of loyaltyRedeemedResult.rows) {
+    const cid = row.campaign_id as string
+    if (!loyaltyRedeemedMap.has(cid)) loyaltyRedeemedMap.set(cid, new Set())
+    if (row.status === 'redeemed') {
+      loyaltyRedeemedMap.get(cid)!.add(row.reward_name as string)
     }
   }
 
@@ -161,8 +177,6 @@ export async function getBusinessCampaignStates(
       }
 
       const claimDeadline = getClaimDeadline(campaign.endDate, meta.claimPeriodDays, meta.capFilledAt)
-      await expireStaleCards(campaignId, claimDeadline, today)
-
       const card = stampCardMap.get(campaignId)
       const enrollmentOpen = isEnrollmentOpen(
         campaign.startDate,

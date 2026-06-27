@@ -29,6 +29,8 @@ import {
 } from './check-in-loyalty-schema.js'
 import { getLoyaltyCampaignStats, type LoyaltyCampaignStats } from './check-in-loyalty.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
+import { TtlCache } from '../utils/ttl-cache.js'
+import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 export const PIN_CYCLE_SECONDS = 120
@@ -372,6 +374,20 @@ const emptyStats = (): CampaignStatsBundle => ({
   rewardsClaimed: 0,
   redeemedCount: 0,
 })
+
+const CAMPAIGNS_LIST_CACHE_TTL_MS = Number(process.env.VENDOR_CAMPAIGNS_CACHE_MS ?? 30_000)
+const campaignsListCache = new TtlCache<CampaignRow[]>(CAMPAIGNS_LIST_CACHE_TTL_MS)
+
+export function invalidateCampaignsListCache(businessId?: string): void {
+  if (businessId) campaignsListCache.delete(businessId)
+  else campaignsListCache.clear()
+}
+
+function invalidateBusinessVendorCaches(businessId: string): void {
+  invalidateCampaignsListCache(businessId)
+  invalidateVendorDashboardCache(businessId)
+  invalidateVendorCustomersCache(businessId)
+}
 
 /** Batch-load participation / play / reward stats for many campaigns (list view). */
 export async function fetchCampaignStatsBatch(
@@ -739,24 +755,34 @@ async function createCheckInLoyaltyCampaignHandler(userId: string, payload: Crea
 }
 
 export async function createCampaign(userId: string, payload: CreateCampaignPayload) {
+  const businessId = await getBusinessIdForUser(userId)
+  let created: CampaignRow
   if (payload.mechanic === 'stamp') {
-    return createStampCampaign(userId, payload)
+    created = await createStampCampaign(userId, payload)
+  } else if (payload.mechanic === 'check-in-loyalty') {
+    created = await createCheckInLoyaltyCampaignHandler(userId, payload)
+  } else {
+    created = await createShakeCampaign(userId, payload)
   }
-  if (payload.mechanic === 'check-in-loyalty') {
-    return createCheckInLoyaltyCampaignHandler(userId, payload)
-  }
-  return createShakeCampaign(userId, payload)
+  invalidateBusinessVendorCaches(businessId)
+  return created
 }
 
 export async function listCampaignsForBusiness(userId: string) {
   const businessId = await getBusinessIdForUser(userId)
+  const cached = campaignsListCache.get(businessId)
+  if (cached) return cached
+
   await autoEndExpiredCampaigns(businessId)
   const result = await db.execute({
     sql: 'SELECT * FROM campaigns WHERE business_id = ? ORDER BY created_at DESC',
     args: [businessId],
   })
   const rows = result.rows as Record<string, unknown>[]
-  if (rows.length === 0) return []
+  if (rows.length === 0) {
+    campaignsListCache.set(businessId, [])
+    return []
+  }
 
   const ids = rows.map(r => r.id as string)
   const [statsMap, rewardsMap] = await Promise.all([
@@ -764,7 +790,7 @@ export async function listCampaignsForBusiness(userId: string) {
     fetchRewardsBatch(ids),
   ])
 
-  return rows.map(row => {
+  const campaigns = rows.map(row => {
     const id = row.id as string
     return mapRowToCampaignListRow(
       row,
@@ -772,6 +798,8 @@ export async function listCampaignsForBusiness(userId: string) {
       rewardsMap.get(id) ?? [],
     )
   })
+  campaignsListCache.set(businessId, campaigns)
+  return campaigns
 }
 
 export async function updateCampaign(
@@ -797,13 +825,16 @@ export async function updateCampaign(
     throw new Error('CANNOT_REACTIVATE_ENDED')
   }
 
+  let updated: CampaignRow
   if (existing.mechanic === 'stamp') {
-    return updateStampCampaign(userId, existing, payload)
+    updated = await updateStampCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'check-in-loyalty') {
+    updated = await updateLoyaltyCampaign(userId, existing, payload)
+  } else {
+    updated = await updateShakeCampaign(userId, existing, payload)
   }
-  if (existing.mechanic === 'check-in-loyalty') {
-    return updateLoyaltyCampaign(userId, existing, payload)
-  }
-  return updateShakeCampaign(userId, existing, payload)
+  invalidateBusinessVendorCaches(existing.businessId)
+  return updated
 }
 
 async function updateShakeCampaign(
@@ -1348,13 +1379,49 @@ export async function listBusinessesWithActiveCampaigns() {
 }
 
 export async function getPublicCampaign(campaignId: string) {
-  const campaign = await getCampaignById(campaignId)
-  const today = todayInCampaignTz()
-  const bizResult = await db.execute({
-    sql: 'SELECT name FROM businesses WHERE id = ?',
-    args: [campaign.businessId],
+  const result = await db.execute({
+    sql: `SELECT c.*, b.name AS business_name
+          FROM campaigns c
+          INNER JOIN businesses b ON b.id = c.business_id
+          WHERE c.id = ?`,
+    args: [campaignId],
   })
-  const businessName = (bizResult.rows[0]?.name as string) ?? ''
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+
+  const [statsMap, rewardsMap] = await Promise.all([
+    fetchCampaignStatsBatch([campaignId]),
+    fetchRewardsBatch([campaignId]),
+  ])
+  const currentUsers = statsMap.get(campaignId)?.currentUsers ?? 0
+  const rewards = rewardsMap.get(campaignId) ?? []
+  const today = todayInCampaignTz()
+
+  const campaign = {
+    id: row.id as string,
+    businessId: row.business_id as string,
+    businessName: row.business_name as string,
+    name: row.name as string,
+    mechanic: row.mechanic as string,
+    status: row.status as string,
+    startDate: row.start_date as string,
+    endDate: row.end_date as string,
+    userCap: row.user_cap as number,
+    currentUsers,
+    perDayUserLimit: row.per_day_user_limit as number,
+    playsPerDay: row.plays_per_day as number,
+    winRatePercent: (() => {
+      const userCap = row.user_cap as number
+      const overallWinners = Number(row.overall_winners ?? 0)
+        || Math.max(1, Math.round(userCap * (row.win_rate_percent as number) / 100))
+      return userCap > 0 ? Math.round((overallWinners / userCap) * 100) : 0
+    })(),
+    overallWinners: Number(row.overall_winners ?? 0)
+      || Math.max(1, Math.round((row.user_cap as number) * (row.win_rate_percent as number) / 100)),
+    configJson: (row.config_json as string) ?? null,
+    claimPeriodDays: Number(row.claim_period_days ?? 30),
+    capFilledAt: (row.cap_filled_at as string) ?? null,
+  }
 
   if (campaign.mechanic === 'stamp') {
     const active = isStampCampaignActive(
@@ -1376,7 +1443,7 @@ export async function getPublicCampaign(campaignId: string) {
     return {
       id: campaign.id,
       businessId: campaign.businessId,
-      businessName,
+      businessName: campaign.businessName,
       name: campaign.name,
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
@@ -1385,7 +1452,7 @@ export async function getPublicCampaign(campaignId: string) {
       currentUsers: campaign.currentUsers,
       claimPeriodDays: campaign.claimPeriodDays,
       stampConfig: meta?.config ?? null,
-      rewards: campaign.rewards.map(r => ({
+      rewards: rewards.map(r => ({
         id: r.id,
         name: r.name,
         description: r.description,
@@ -1407,7 +1474,7 @@ export async function getPublicCampaign(campaignId: string) {
     return {
       id: campaign.id,
       businessId: campaign.businessId,
-      businessName,
+      businessName: campaign.businessName,
       name: campaign.name,
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
@@ -1415,7 +1482,7 @@ export async function getPublicCampaign(campaignId: string) {
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       checkInConfig,
-      rewards: campaign.rewards.map(r => ({
+      rewards: rewards.map(r => ({
         id: r.id,
         name: r.name,
         description: r.description,
@@ -1432,7 +1499,7 @@ export async function getPublicCampaign(campaignId: string) {
   return {
     id: campaign.id,
     businessId: campaign.businessId,
-    businessName,
+    businessName: campaign.businessName,
     name: campaign.name,
     mechanic: campaign.mechanic,
     startDate: campaign.startDate,
@@ -1440,7 +1507,7 @@ export async function getPublicCampaign(campaignId: string) {
     playsPerDay: campaign.playsPerDay,
     winRatePercent: campaign.winRatePercent,
     overallWinners: campaign.overallWinners,
-    rewards: campaign.rewards.map(r => ({
+    rewards: rewards.map(r => ({
       id: r.id,
       name: r.name,
       description: r.description,
