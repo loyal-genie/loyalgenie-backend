@@ -521,6 +521,24 @@ async function auditPin(campaignId: string) {
   console.log(`  ${newPin ? '✓' : '✗'} Rotation: ${Math.round(elapsed)}ms`)
 }
 
+async function fetchDeployedBundleText(htmlText: string, indexPath: string): Promise<string> {
+  const indexRes = await fetch(`${FRONTEND_URL}${indexPath}`)
+  const indexText = await indexRes.text()
+  const chunkPaths = [...new Set(indexText.match(/assets\/[a-zA-Z0-9_-]+\.js/g) ?? [])]
+  const priority = chunkPaths.filter(p => /api-|supabase|useDebouncedCallback|realtime/i.test(p))
+  const toFetch = [...new Set([...priority, ...chunkPaths.slice(0, 15)])]
+  const parts = [htmlText, indexText]
+  for (const rel of toFetch) {
+    try {
+      const res = await fetch(`${FRONTEND_URL}/${rel}`)
+      parts.push(await res.text())
+    } catch {
+      /* optional chunk */
+    }
+  }
+  return parts.join('\n')
+}
+
 async function auditFrontend() {
   console.log('\n── Frontend (Vercel) ──\n')
 
@@ -540,11 +558,9 @@ async function auditFrontend() {
     })
 
     const scriptMatch = htmlText.match(/src="(\/assets\/index-[^"]+\.js)"/)
-    let bundleText = htmlText
-    if (scriptMatch?.[1]) {
-      const jsRes = await fetch(`${FRONTEND_URL}${scriptMatch[1]}`)
-      bundleText = await jsRes.text()
-    }
+    const bundleText = scriptMatch?.[1]
+      ? await fetchDeployedBundleText(htmlText, scriptMatch[1])
+      : htmlText
 
     const hasApi =
       bundleText.includes('loyalgenie-backend-uat.onrender.com') ||
