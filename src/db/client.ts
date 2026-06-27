@@ -21,7 +21,7 @@ export const pool = new Pool({
   max: Number(process.env.PG_POOL_MAX ?? 10),
 })
 
-pool.on('error', (err) => {
+pool.on('error', (err: Error) => {
   console.error('Unexpected Postgres pool error:', err)
 })
 

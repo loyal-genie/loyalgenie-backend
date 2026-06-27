@@ -2,7 +2,7 @@ services:
   - type: web
     name: loyalgenie-backend
     runtime: node
-    buildCommand: npm install && npm run build
+    buildCommand: NPM_CONFIG_PRODUCTION=false npm install && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
