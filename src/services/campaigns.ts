@@ -1079,8 +1079,7 @@ export async function rotatePinIfExpired(campaignId: string) {
     })
   }
 
-  const currentUsers = await fetchCurrentUsers(campaignId)
-  return mapRowToCampaignLite(current, currentUsers)
+  return getCampaignLiteById(campaignId)
 }
 
 export async function getCampaignById(campaignId: string) {
@@ -1220,6 +1219,11 @@ export async function listBusinessesWithActiveCampaigns() {
 export async function getPublicCampaign(campaignId: string) {
   const campaign = await getCampaignById(campaignId)
   const today = todayInCampaignTz()
+  const bizResult = await db.execute({
+    sql: 'SELECT name FROM businesses WHERE id = ?',
+    args: [campaign.businessId],
+  })
+  const businessName = (bizResult.rows[0]?.name as string) ?? ''
 
   if (campaign.mechanic === 'stamp') {
     const active = isStampCampaignActive(
@@ -1241,6 +1245,7 @@ export async function getPublicCampaign(campaignId: string) {
     return {
       id: campaign.id,
       businessId: campaign.businessId,
+      businessName,
       name: campaign.name,
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
@@ -1271,6 +1276,7 @@ export async function getPublicCampaign(campaignId: string) {
     return {
       id: campaign.id,
       businessId: campaign.businessId,
+      businessName,
       name: campaign.name,
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
@@ -1295,6 +1301,7 @@ export async function getPublicCampaign(campaignId: string) {
   return {
     id: campaign.id,
     businessId: campaign.businessId,
+    businessName,
     name: campaign.name,
     mechanic: campaign.mechanic,
     startDate: campaign.startDate,
