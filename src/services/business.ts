@@ -17,18 +17,8 @@ export const businessUpdateSchema = onboardingSchema
 
 export type BusinessUpdatePayload = z.infer<typeof businessUpdateSchema>
 
-function parsePhotoArray(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw as string[]
-  if (typeof raw === 'string' && raw) {
-    try {
-      const parsed = JSON.parse(raw)
-      return Array.isArray(parsed) ? parsed : []
-    } catch {
-      return []
-    }
-  }
-  return []
-}
+import { resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
+import { normalizePhotoArrayInput, normalizeSingleImageInput } from '../utils/media-input.js'
 
 function rowToProfile(row: Record<string, unknown>, branch?: Record<string, unknown> | null) {
   return {
@@ -60,10 +50,10 @@ function rowToProfile(row: Record<string, unknown>, branch?: Record<string, unkn
     branchName: (branch?.name as string) ?? '',
     branchCity: (branch?.city as string) ?? '',
     branchAddress: (branch?.address as string) ?? '',
-    logoData: (row.logo_data as string) ?? '',
-    coverBannerData: (row.cover_banner_data as string) ?? '',
-    interiorPhotosData: parsePhotoArray(row.interior_photos_data),
-    exteriorPhotosData: parsePhotoArray(row.exterior_photos_data),
+    logoData: resolveImageField(row.logo_url, null),
+    coverBannerData: resolveImageField(row.cover_banner_url, null),
+    interiorPhotosData: resolvePhotoArrayField(row.interior_photo_urls, null),
+    exteriorPhotosData: resolvePhotoArrayField(row.exterior_photo_urls, null),
   }
 }
 
@@ -115,13 +105,16 @@ export async function updateBusinessProfile(userId: string, payload: BusinessUpd
     ['rating', 'rating'],
     ['latitude', 'latitude'],
     ['longitude', 'longitude'],
-    ['logoData', 'logo_data'],
-    ['coverBannerData', 'cover_banner_data'],
+  ]
+
+  const imageFieldMap: [keyof BusinessUpdatePayload, string][] = [
+    ['logoData', 'logo_url'],
+    ['coverBannerData', 'cover_banner_url'],
   ]
 
   const jsonFieldMap: [keyof BusinessUpdatePayload, string][] = [
-    ['interiorPhotosData', 'interior_photos_data'],
-    ['exteriorPhotosData', 'exterior_photos_data'],
+    ['interiorPhotosData', 'interior_photo_urls'],
+    ['exteriorPhotosData', 'exterior_photo_urls'],
   ]
 
   const sets: string[] = []
@@ -129,14 +122,23 @@ export async function updateBusinessProfile(userId: string, payload: BusinessUpd
   for (const [key, col] of fieldMap) {
     if (payload[key] !== undefined) {
       sets.push(`${col} = ?`)
-      args.push((payload[key] as string) || null)
+      args.push((payload[key] as string | number) ?? null)
     }
   }
 
-  for (const [key, col] of jsonFieldMap) {
+  for (const [key, urlCol] of imageFieldMap) {
     if (payload[key] !== undefined) {
-      sets.push(`${col} = ?`)
-      args.push(JSON.stringify(payload[key] ?? []))
+      const normalized = normalizeSingleImageInput(payload[key] as string)
+      sets.push(`${urlCol} = ?`)
+      args.push(normalized.url)
+    }
+  }
+
+  for (const [key, urlCol] of jsonFieldMap) {
+    if (payload[key] !== undefined) {
+      const normalized = normalizePhotoArrayInput(payload[key] as string[])
+      sets.push(`${urlCol} = ?`)
+      args.push(JSON.stringify(normalized.urls))
     }
   }
 

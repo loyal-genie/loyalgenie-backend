@@ -28,6 +28,7 @@ import {
   type CreateCheckInLoyaltyCampaignPayload,
 } from './check-in-loyalty-schema.js'
 import { getLoyaltyCampaignStats, type LoyaltyCampaignStats } from './check-in-loyalty.js'
+import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 export const PIN_CYCLE_SECONDS = 120
@@ -179,6 +180,29 @@ export interface CampaignRow {
   stampStats?: StampCampaignStats | null
   loyaltyStats?: LoyaltyCampaignStats | null
 }
+
+/** Lightweight campaign read — no stats/rewards aggregation (hot paths). */
+export type CampaignLite = Pick<
+  CampaignRow,
+  | 'id'
+  | 'businessId'
+  | 'name'
+  | 'mechanic'
+  | 'status'
+  | 'startDate'
+  | 'endDate'
+  | 'userCap'
+  | 'perDayUserLimit'
+  | 'playsPerDay'
+  | 'overallWinners'
+  | 'winRatePercent'
+  | 'pin'
+  | 'pinExpiresAt'
+  | 'configJson'
+  | 'claimPeriodDays'
+  | 'capFilledAt'
+  | 'currentUsers'
+>
 
 export type PlayBlockReason =
   | 'campaign_inactive'
@@ -347,29 +371,70 @@ async function fetchRewards(campaignId: string): Promise<CampaignReward[]> {
 }
 
 async function fetchStats(campaignId: string) {
-  const users = await db.execute({
+  const result = await db.execute({
+    sql: `SELECT
+      (SELECT COUNT(*) FROM campaign_participations WHERE campaign_id = ?) AS current_users,
+      (SELECT COUNT(*) FROM game_plays WHERE campaign_id = ?) AS participations,
+      (SELECT COUNT(*) FROM game_plays WHERE campaign_id = ? AND won = 1) AS rewards_claimed,
+      (SELECT COUNT(*) FROM customer_rewards WHERE campaign_id = ? AND status = 'redeemed') AS redeemed_count`,
+    args: [campaignId, campaignId, campaignId, campaignId],
+  })
+  const row = result.rows[0] ?? {}
+  return {
+    currentUsers: Number(row.current_users ?? 0),
+    participations: Number(row.participations ?? 0),
+    rewardsClaimed: Number(row.rewards_claimed ?? 0),
+    redeemedCount: Number(row.redeemed_count ?? 0),
+  }
+}
+
+async function fetchCurrentUsers(campaignId: string): Promise<number> {
+  const result = await db.execute({
     sql: 'SELECT COUNT(*) as c FROM campaign_participations WHERE campaign_id = ?',
     args: [campaignId],
   })
-  const plays = await db.execute({
-    sql: 'SELECT COUNT(*) as c FROM game_plays WHERE campaign_id = ?',
-    args: [campaignId],
-  })
-  const wins = await db.execute({
-    sql: 'SELECT COUNT(*) as c FROM game_plays WHERE campaign_id = ? AND won = 1',
-    args: [campaignId],
-  })
-  const redeemed = await db.execute({
-    sql: `SELECT COUNT(*) as c FROM customer_rewards
-          WHERE campaign_id = ? AND status = 'redeemed'`,
-    args: [campaignId],
-  })
+  return Number(result.rows[0]?.c ?? 0)
+}
+
+function mapRowToCampaignLite(
+  row: Record<string, unknown>,
+  currentUsers = 0,
+): CampaignLite {
+  const userCap = row.user_cap as number
+  const overallWinners = Number(row.overall_winners ?? 0)
+    || Math.max(1, Math.round(userCap * (row.win_rate_percent as number) / 100))
   return {
-    currentUsers: Number(users.rows[0]?.c ?? 0),
-    participations: Number(plays.rows[0]?.c ?? 0),
-    rewardsClaimed: Number(wins.rows[0]?.c ?? 0),
-    redeemedCount: Number(redeemed.rows[0]?.c ?? 0),
+    id: row.id as string,
+    businessId: row.business_id as string,
+    name: row.name as string,
+    mechanic: row.mechanic as string,
+    status: row.status as string,
+    startDate: row.start_date as string,
+    endDate: row.end_date as string,
+    userCap,
+    perDayUserLimit: row.per_day_user_limit as number,
+    playsPerDay: row.plays_per_day as number,
+    overallWinners,
+    winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : 0,
+    pin: (row.pin as string) ?? null,
+    pinExpiresAt: (row.pin_expires_at as string) ?? null,
+    configJson: (row.config_json as string) ?? null,
+    claimPeriodDays: Number(row.claim_period_days ?? 30),
+    capFilledAt: (row.cap_filled_at as string) ?? null,
+    currentUsers,
   }
+}
+
+export async function getCampaignLiteById(campaignId: string): Promise<CampaignLite> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM campaigns WHERE id = ?',
+    args: [campaignId],
+  })
+  const row = result.rows[0]
+  if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+  const ensured = await ensureCampaignNotPastEnd(row as Record<string, unknown>)
+  const currentUsers = await fetchCurrentUsers(campaignId)
+  return mapRowToCampaignLite(ensured, currentUsers)
 }
 
 async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow> {
@@ -921,8 +986,14 @@ export async function getCampaignForBusiness(userId: string, campaignId: string)
 }
 
 export async function getCampaignPinForBusiness(userId: string, campaignId: string) {
-  const campaign = await getCampaignForBusiness(userId, campaignId)
-  const refreshed = await rotatePinIfExpired(campaign.id)
+  const businessId = await getBusinessIdForUser(userId)
+  const owned = await db.execute({
+    sql: 'SELECT id FROM campaigns WHERE id = ? AND business_id = ?',
+    args: [campaignId, businessId],
+  })
+  if (!owned.rows[0]) throw new Error('CAMPAIGN_NOT_FOUND')
+
+  const refreshed = await rotatePinIfExpired(campaignId)
   const cycleSeconds = pinCycleSecondsForMechanic(refreshed.mechanic)
   const pinActive = refreshed.mechanic === 'stamp'
     ? isPinActiveForStamp(
@@ -990,17 +1061,26 @@ export async function rotatePinIfExpired(campaignId: string) {
       args: [pin, pinExpires, oldPin, graceUntil, campaignId, nowIso],
     })
 
-    if ((updated.rowsAffected ?? 0) === 0) {
-      return getCampaignById(campaignId)
+    if ((updated.rowCount ?? 0) === 0) {
+      return getCampaignLiteById(campaignId)
     }
 
     current.pin = pin
     current.pin_expires_at = pinExpires
     current.previous_pin = oldPin
     current.previous_pin_valid_until = graceUntil
+  } else if (needsRotation && !pinStillNeeded && expiresAt) {
+    // Inactive / ended campaigns — clear stale expiry so scheduler does not loop
+    await db.execute({
+      sql: `UPDATE campaigns
+            SET pin = NULL, pin_expires_at = NULL, previous_pin = NULL, previous_pin_valid_until = NULL
+            WHERE id = ? AND pin_expires_at IS NOT NULL`,
+      args: [campaignId],
+    })
   }
 
-  return await rowToCampaign(current)
+  const currentUsers = await fetchCurrentUsers(campaignId)
+  return mapRowToCampaignLite(current, currentUsers)
 }
 
 export async function getCampaignById(campaignId: string) {
@@ -1018,8 +1098,9 @@ export async function listBusinessesWithActiveCampaigns() {
   const today = todayInCampaignTz()
   const result = await db.execute({
     sql: `SELECT DISTINCT b.id, b.name, b.tagline, b.business_type, b.city, b.brand_color,
-                 b.logo_data, b.cover_banner_data, b.address, b.landmark, b.mobile,
-                 b.operating_hours, b.google_review, b.interior_photos_data,
+                 b.logo_url, b.cover_banner_url, b.cover_thumbnail_url,
+                 b.address, b.landmark, b.mobile,
+                 b.operating_hours, b.google_review, b.interior_photo_urls,
                  b.rating, b.latitude, b.longitude, b.display_distance_km, b.mechanic_tags,
                  br.address AS branch_address, br.city AS branch_city
           FROM businesses b
@@ -1031,94 +1112,109 @@ export async function listBusinessesWithActiveCampaigns() {
     args: [today],
   })
 
-  function parsePhotoArray(raw: unknown): string[] {
-    if (Array.isArray(raw)) return raw as string[]
-    if (typeof raw === 'string' && raw) {
-      try {
-        const parsed = JSON.parse(raw)
-        return Array.isArray(parsed) ? parsed : []
-      } catch {
-        return []
-      }
-    }
-    return []
+  function parseMechanicTags(raw: unknown): string[] {
+    return parsePhotoArray(raw)
   }
 
-  const businesses = await Promise.all(
-    result.rows.map(async row => {
-      const businessId = row.id as string
-      const campaignsResult = await db.execute({
-        sql: `SELECT id, name, mechanic, start_date, end_date, user_cap, per_day_user_limit,
-                     win_rate_percent, plays_per_day, overall_winners,
-                     claim_period_days, cap_filled_at, config_json
-              FROM campaigns
-              WHERE business_id = ? AND status = 'active' AND start_date <= ?`,
-        args: [businessId, today],
-      })
-      const campaigns = campaignsResult.rows.filter(c => {
-        const mechanic = c.mechanic as string
-        if (mechanic === 'stamp') {
-          return isStampCampaignActive(
-            'active',
-            c.start_date as string,
-            c.end_date as string,
-            Number(c.claim_period_days ?? 30),
-            (c.cap_filled_at as string) ?? null,
-            today,
-          )
-        }
-        if (mechanic === 'check-in-loyalty') {
-          const endDate = c.end_date as string
-          const startDate = c.start_date as string
-          return today >= startDate && today <= endDate
-        }
-        const endDate = c.end_date as string
-        return today <= endDate
-      })
-      return {
-        id: businessId,
-        name: row.name as string,
-        tagline: (row.tagline as string) ?? '',
-        businessType: (row.business_type as string) ?? 'Business',
-        city: (row.city as string) ?? '',
-        brandColor: (row.brand_color as string) ?? '#7C3AED',
-        logoData: (row.logo_data as string) ?? '',
-        coverBannerData: (row.cover_banner_data as string) ?? '',
-        address: (row.address as string) ?? '',
-        landmark: (row.landmark as string) ?? '',
-        mobile: (row.mobile as string) ?? '',
-        operatingHours: (row.operating_hours as string) ?? '',
-        googleReview: (row.google_review as string) ?? '',
-        interiorPhotosData: parsePhotoArray(row.interior_photos_data),
-        branchAddress: (row.branch_address as string) ?? '',
-        branchCity: (row.branch_city as string) ?? '',
-        rating: row.rating != null ? Number(row.rating) : null,
-        latitude: row.latitude != null ? Number(row.latitude) : null,
-        longitude: row.longitude != null ? Number(row.longitude) : null,
-        displayDistanceKm: row.display_distance_km != null ? Number(row.display_distance_km) : null,
-        mechanicTags: parsePhotoArray(row.mechanic_tags),
-        campaigns: campaigns.map(c => {
-          const userCap = c.user_cap as number
-          const winRate = c.win_rate_percent as number
-          const overallWinners = Number(c.overall_winners ?? 0)
-            || Math.max(1, Math.round(userCap * winRate / 100))
-          return {
-            id: c.id as string,
-            name: c.name as string,
-            mechanic: c.mechanic as string,
-            startDate: c.start_date as string,
-            endDate: c.end_date as string,
-            winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : winRate,
-            overallWinners,
-            userCap,
-            playsPerDay: c.plays_per_day as number,
-          }
-        }),
-      }
-    }),
-  )
+  function isCampaignRowVisible(c: Record<string, unknown>, day: string): boolean {
+    const mechanic = c.mechanic as string
+    if (mechanic === 'stamp') {
+      return isStampCampaignActive(
+        'active',
+        c.start_date as string,
+        c.end_date as string,
+        Number(c.claim_period_days ?? 30),
+        (c.cap_filled_at as string) ?? null,
+        day,
+      )
+    }
+    if (mechanic === 'check-in-loyalty') {
+      return day >= (c.start_date as string) && day <= (c.end_date as string)
+    }
+    return day <= (c.end_date as string)
+  }
 
-  return businesses.filter(b => b.campaigns.length > 0)
+  function mapCampaignListItem(c: Record<string, unknown>) {
+    const userCap = c.user_cap as number
+    const winRate = c.win_rate_percent as number
+    const overallWinners = Number(c.overall_winners ?? 0)
+      || Math.max(1, Math.round(userCap * winRate / 100))
+    return {
+      id: c.id as string,
+      name: c.name as string,
+      mechanic: c.mechanic as string,
+      startDate: c.start_date as string,
+      endDate: c.end_date as string,
+      winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : winRate,
+      overallWinners,
+      userCap,
+      playsPerDay: c.plays_per_day as number,
+    }
+  }
+
+  const businessRows = result.rows
+  const businessIds = [...new Set(businessRows.map(r => r.id as string))]
+  if (businessIds.length === 0) return []
+
+  const placeholders = businessIds.map(() => '?').join(', ')
+  const campaignsResult = await db.execute({
+    sql: `SELECT id, business_id, name, mechanic, start_date, end_date, user_cap, per_day_user_limit,
+                 win_rate_percent, plays_per_day, overall_winners,
+                 claim_period_days, cap_filled_at, config_json
+          FROM campaigns
+          WHERE business_id IN (${placeholders}) AND status = 'active' AND start_date <= ?`,
+    args: [...businessIds, today],
+  })
+
+  const campaignsByBusiness = new Map<string, Record<string, unknown>[]>()
+  for (const c of campaignsResult.rows as Record<string, unknown>[]) {
+    if (!isCampaignRowVisible(c, today)) continue
+    const businessId = c.business_id as string
+    const list = campaignsByBusiness.get(businessId) ?? []
+    list.push(c)
+    campaignsByBusiness.set(businessId, list)
+  }
+
+  const seen = new Set<string>()
+  const businesses = []
+  for (const row of businessRows) {
+    const businessId = row.id as string
+    if (seen.has(businessId)) continue
+    seen.add(businessId)
+
+    const campaigns = (campaignsByBusiness.get(businessId) ?? []).map(mapCampaignListItem)
+    if (campaigns.length === 0) continue
+
+    businesses.push({
+      id: businessId,
+      name: row.name as string,
+      tagline: (row.tagline as string) ?? '',
+      businessType: (row.business_type as string) ?? 'Business',
+      city: (row.city as string) ?? '',
+      brandColor: (row.brand_color as string) ?? '#7C3AED',
+      logoData: resolveImageField(row.logo_url, null),
+      coverBannerData: resolveImageField(
+        row.cover_thumbnail_url ?? row.cover_banner_url,
+        null,
+      ),
+      address: (row.address as string) ?? '',
+      landmark: (row.landmark as string) ?? '',
+      mobile: (row.mobile as string) ?? '',
+      operatingHours: (row.operating_hours as string) ?? '',
+      googleReview: (row.google_review as string) ?? '',
+      interiorPhotosData: resolvePhotoArrayField(row.interior_photo_urls, null),
+      branchAddress: (row.branch_address as string) ?? '',
+      branchCity: (row.branch_city as string) ?? '',
+      rating: row.rating != null ? Number(row.rating) : null,
+      latitude: row.latitude != null ? Number(row.latitude) : null,
+      longitude: row.longitude != null ? Number(row.longitude) : null,
+      displayDistanceKm: row.display_distance_km != null ? Number(row.display_distance_km) : null,
+      mechanicTags: parseMechanicTags(row.mechanic_tags),
+      campaigns,
+    })
+  }
+
+  return businesses
 }
 
 export async function getPublicCampaign(campaignId: string) {
@@ -1315,7 +1411,7 @@ export async function verifyCampaignPin(campaignId: string, pin: string, custome
 }
 
 export async function getPlayState(campaignId: string, customerId: string) {
-  const campaign = await getCampaignById(campaignId)
+  const campaign = await getCampaignLiteById(campaignId)
   const eligibility = await checkEligibility(campaign, customerId)
   return {
     campaignId,
@@ -1341,7 +1437,7 @@ interface EligibilityResult {
 }
 
 export async function checkEligibility(
-  campaign: CampaignRow,
+  campaign: CampaignLite | CampaignRow,
   customerId: string,
 ): Promise<EligibilityResult> {
   const base = {

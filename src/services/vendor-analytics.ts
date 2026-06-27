@@ -229,8 +229,8 @@ export async function getVendorDashboardStats(userId: string): Promise<VendorDas
       SELECT
         COUNT(*) AS total_plays,
         SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END) AS total_wins,
-        SUM(CASE WHEN gp.played_at >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS plays_last_30d,
-        COUNT(DISTINCT CASE WHEN gp.played_at >= datetime('now', '-30 days') THEN gp.customer_id END) AS customers_last_30d
+        SUM(CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS plays_last_30d,
+        COUNT(DISTINCT CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN gp.customer_id END) AS customers_last_30d
       FROM game_plays gp
       INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
     `,
@@ -248,8 +248,8 @@ export async function getVendorDashboardStats(userId: string): Promise<VendorDas
       SELECT COUNT(DISTINCT gp.customer_id) AS cnt
       FROM game_plays gp
       INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
-      WHERE gp.played_at >= datetime('now', '-60 days')
-        AND gp.played_at < datetime('now', '-30 days')
+      WHERE (gp.played_at)::timestamptz >= datetime('now', '-60 days')
+        AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
     `,
     args: [businessId],
   })
@@ -262,14 +262,14 @@ export async function getVendorDashboardStats(userId: string): Promise<VendorDas
         SELECT DISTINCT gp.customer_id
         FROM game_plays gp
         INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
-        WHERE gp.played_at >= datetime('now', '-30 days')
+        WHERE (gp.played_at)::timestamptz >= datetime('now', '-30 days')
       ) recent
       INNER JOIN (
         SELECT DISTINCT gp.customer_id
         FROM game_plays gp
         INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
-        WHERE gp.played_at >= datetime('now', '-60 days')
-          AND gp.played_at < datetime('now', '-30 days')
+        WHERE (gp.played_at)::timestamptz >= datetime('now', '-60 days')
+          AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
       ) prior ON prior.customer_id = recent.customer_id
     `,
     args: [businessId, businessId],

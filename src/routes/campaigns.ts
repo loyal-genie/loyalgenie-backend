@@ -28,6 +28,7 @@ import {
   getPendingCheckInPrompt,
   listCustomerLoyaltyProfiles,
 } from '../services/check-in-loyalty.js'
+import { getBusinessCampaignStates } from '../services/business-campaign-states.js'
 
 const router = Router()
 
@@ -40,6 +41,16 @@ router.get('/public/businesses', async (_req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to list businesses' })
+  }
+})
+
+router.get('/public/businesses/:businessId/states', requireCustomerAuth, async (req, res) => {
+  try {
+    const states = await getBusinessCampaignStates(String(req.params.businessId), req.user!.id)
+    res.json({ success: true, data: states })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Failed to fetch campaign states' })
   }
 })
 

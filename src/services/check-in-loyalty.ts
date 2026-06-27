@@ -4,6 +4,7 @@ import { todayInCampaignTz } from '../utils/campaign-dates.js'
 import {
   verifyPlaySession,
   getCampaignById,
+  getCampaignLiteById,
   type CampaignReward,
 } from './campaigns.js'
 import {
@@ -156,7 +157,7 @@ export interface LoyaltyState {
 }
 
 export async function getLoyaltyState(campaignId: string, customerId: string): Promise<LoyaltyState> {
-  const campaign = await getCampaignById(campaignId)
+  const campaign = await getCampaignLiteById(campaignId)
   if (campaign.mechanic !== 'check-in-loyalty') throw new Error('NOT_LOYALTY_CAMPAIGN')
 
   const config = parseCheckInConfig(campaign.configJson)
