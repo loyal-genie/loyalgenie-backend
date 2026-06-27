@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid'
 import { db } from '../db/client.js'
 import { getBusinessForUser } from './auth.js'
+import { TtlCache } from '../utils/ttl-cache.js'
 
 async function getBusinessIdForUser(userId: string): Promise<string> {
   const business = await getBusinessForUser(userId)
@@ -93,6 +94,14 @@ export interface VendorDashboardStats {
   totalRedeemed: number
   playsLast30d: number
   returningCustomers30d: number
+}
+
+const DASHBOARD_CACHE_TTL_MS = Number(process.env.VENDOR_DASHBOARD_CACHE_MS ?? 30_000)
+const dashboardCache = new TtlCache<VendorDashboardStats>(DASHBOARD_CACHE_TTL_MS)
+
+export function invalidateVendorDashboardCache(businessId?: string): void {
+  if (businessId) dashboardCache.delete(businessId)
+  else dashboardCache.clear()
 }
 
 function mapCustomerRow(row: Record<string, unknown>): VendorCustomerSummary {
@@ -204,6 +213,15 @@ function computeSegment(c: VendorCustomerSummary): 'loyalist' | 'regular' | 'at-
 
 export async function getVendorDashboardStats(userId: string): Promise<VendorDashboardStats> {
   const businessId = await getBusinessIdForUser(userId)
+  const cached = dashboardCache.get(businessId)
+  if (cached) return cached
+
+  const stats = await computeVendorDashboardStats(businessId)
+  dashboardCache.set(businessId, stats)
+  return stats
+}
+
+async function computeVendorDashboardStats(businessId: string): Promise<VendorDashboardStats> {
   const customers = await fetchCustomerSummaries(businessId)
 
   const segmentCounts = { loyalist: 0, regular: 0, atRisk: 0, inactive: 0 }
@@ -230,7 +248,11 @@ export async function getVendorDashboardStats(userId: string): Promise<VendorDas
         COUNT(*) AS total_plays,
         SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END) AS total_wins,
         SUM(CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS plays_last_30d,
-        COUNT(DISTINCT CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN gp.customer_id END) AS customers_last_30d
+        COUNT(DISTINCT CASE WHEN (gp.played_at)::timestamptz >= datetime('now', '-30 days') THEN gp.customer_id END) AS customers_last_30d,
+        COUNT(DISTINCT CASE
+          WHEN (gp.played_at)::timestamptz >= datetime('now', '-60 days')
+           AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
+          THEN gp.customer_id END) AS customers_prior_30d
       FROM game_plays gp
       INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
     `,
@@ -242,18 +264,7 @@ export async function getVendorDashboardStats(userId: string): Promise<VendorDas
   const totalWins = Number(playRow.total_wins ?? 0)
   const playsLast30d = Number(playRow.plays_last_30d ?? 0)
   const customersLast30d = Number(playRow.customers_last_30d ?? 0)
-
-  const priorResult = await db.execute({
-    sql: `
-      SELECT COUNT(DISTINCT gp.customer_id) AS cnt
-      FROM game_plays gp
-      INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
-      WHERE (gp.played_at)::timestamptz >= datetime('now', '-60 days')
-        AND (gp.played_at)::timestamptz < datetime('now', '-30 days')
-    `,
-    args: [businessId],
-  })
-  const customersPrior30d = Number(priorResult.rows[0]?.cnt ?? 0)
+  const customersPrior30d = Number(playRow.customers_prior_30d ?? 0)
 
   const returningResult = await db.execute({
     sql: `
@@ -282,25 +293,16 @@ export async function getVendorDashboardStats(userId: string): Promise<VendorDas
 
   const pendingResult = await db.execute({
     sql: `
-      SELECT COUNT(*) AS cnt
+      SELECT
+        SUM(CASE WHEN cr.status = 'pending' THEN 1 ELSE 0 END) AS pending_cnt,
+        SUM(CASE WHEN cr.status = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_cnt
       FROM customer_rewards cr
       INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
-      WHERE cr.status = 'pending'
     `,
     args: [businessId],
   })
-  const pendingRedemptions = Number(pendingResult.rows[0]?.cnt ?? 0)
-
-  const redeemedResult = await db.execute({
-    sql: `
-      SELECT COUNT(*) AS cnt
-      FROM customer_rewards cr
-      INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
-      WHERE cr.status = 'redeemed'
-    `,
-    args: [businessId],
-  })
-  const totalRedeemed = Number(redeemedResult.rows[0]?.cnt ?? 0)
+  const pendingRedemptions = Number(pendingResult.rows[0]?.pending_cnt ?? 0)
+  const totalRedeemed = Number(pendingResult.rows[0]?.redeemed_cnt ?? 0)
 
   const atRiskCustomers = customers
     .filter(c => {
@@ -457,4 +459,6 @@ export async function markRedemptionRedeemed(userId: string, rewardId: string) {
     sql: `UPDATE customer_rewards SET status = 'redeemed', redeemed_at = datetime('now') WHERE id = ?`,
     args: [rewardId],
   })
+
+  invalidateVendorDashboardCache(businessId)
 }

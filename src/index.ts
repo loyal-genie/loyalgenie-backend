@@ -120,6 +120,27 @@ app.get('/api/health', (_req, res) => {
   })
 })
 
+/** DB + server timing for UAT latency audits (no auth). */
+app.get('/api/health/deep', async (_req, res) => {
+  const start = performance.now()
+  const dbStart = performance.now()
+  try {
+    await verifyDatabaseConnection()
+  } catch (err) {
+    res.status(503).json({ status: 'error', error: String(err) })
+    return
+  }
+  const dbMs = performance.now() - dbStart
+  const serverMs = performance.now() - start
+  res.json({
+    status: 'ok',
+    timing: {
+      dbMs: Math.round(dbMs),
+      serverMs: Math.round(serverMs),
+    },
+  })
+})
+
 app.use('/api/onboarding', onboardingRoutes)
 app.use('/api/auth', authRoutes)
 app.use('/api/business', businessRoutes)

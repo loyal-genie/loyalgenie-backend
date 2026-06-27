@@ -251,7 +251,7 @@ async function evaluateTriggers(
   return results
 }
 
-async function expireStaleCards(campaignId: string, claimDeadline: string, today: string): Promise<void> {
+export async function expireStaleCards(campaignId: string, claimDeadline: string, today: string): Promise<void> {
   if (today <= claimDeadline) return
   await db.execute({
     sql: `UPDATE stamp_cards SET status = 'expired', expired_at = datetime('now')

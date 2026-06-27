@@ -355,37 +355,105 @@ async function getBusinessIdForUser(userId: string): Promise<string> {
 }
 
 async function fetchRewards(campaignId: string): Promise<CampaignReward[]> {
+  const batch = await fetchRewardsBatch([campaignId])
+  return batch.get(campaignId) ?? []
+}
+
+interface CampaignStatsBundle {
+  currentUsers: number
+  participations: number
+  rewardsClaimed: number
+  redeemedCount: number
+}
+
+const emptyStats = (): CampaignStatsBundle => ({
+  currentUsers: 0,
+  participations: 0,
+  rewardsClaimed: 0,
+  redeemedCount: 0,
+})
+
+/** Batch-load participation / play / reward stats for many campaigns (list view). */
+export async function fetchCampaignStatsBatch(
+  campaignIds: string[],
+): Promise<Map<string, CampaignStatsBundle>> {
+  const map = new Map<string, CampaignStatsBundle>()
+  if (campaignIds.length === 0) return map
+  for (const id of campaignIds) map.set(id, emptyStats())
+
+  const placeholders = campaignIds.map(() => '?').join(', ')
+
+  const [users, plays, wins, redeemed] = await Promise.all([
+    db.execute({
+      sql: `SELECT campaign_id, COUNT(*) AS c FROM campaign_participations
+            WHERE campaign_id IN (${placeholders}) GROUP BY campaign_id`,
+      args: campaignIds,
+    }),
+    db.execute({
+      sql: `SELECT campaign_id, COUNT(*) AS c FROM game_plays
+            WHERE campaign_id IN (${placeholders}) GROUP BY campaign_id`,
+      args: campaignIds,
+    }),
+    db.execute({
+      sql: `SELECT campaign_id, COUNT(*) AS c FROM game_plays
+            WHERE campaign_id IN (${placeholders}) AND won = 1 GROUP BY campaign_id`,
+      args: campaignIds,
+    }),
+    db.execute({
+      sql: `SELECT campaign_id, COUNT(*) AS c FROM customer_rewards
+            WHERE campaign_id IN (${placeholders}) AND status = 'redeemed' GROUP BY campaign_id`,
+      args: campaignIds,
+    }),
+  ])
+
+  for (const row of users.rows) {
+    map.get(row.campaign_id as string)!.currentUsers = Number(row.c ?? 0)
+  }
+  for (const row of plays.rows) {
+    map.get(row.campaign_id as string)!.participations = Number(row.c ?? 0)
+  }
+  for (const row of wins.rows) {
+    map.get(row.campaign_id as string)!.rewardsClaimed = Number(row.c ?? 0)
+  }
+  for (const row of redeemed.rows) {
+    map.get(row.campaign_id as string)!.redeemedCount = Number(row.c ?? 0)
+  }
+
+  return map
+}
+
+async function fetchRewardsBatch(campaignIds: string[]): Promise<Map<string, CampaignReward[]>> {
+  const map = new Map<string, CampaignReward[]>()
+  if (campaignIds.length === 0) return map
+  for (const id of campaignIds) map.set(id, [])
+
+  const placeholders = campaignIds.map(() => '?').join(', ')
   const result = await db.execute({
-    sql: `SELECT id, name, description, icon, share_percent, reward_tier FROM campaign_rewards
-          WHERE campaign_id = ? ORDER BY sort_order ASC`,
-    args: [campaignId],
+    sql: `SELECT id, campaign_id, name, description, icon, share_percent, reward_tier
+          FROM campaign_rewards
+          WHERE campaign_id IN (${placeholders})
+          ORDER BY campaign_id ASC, sort_order ASC`,
+    args: campaignIds,
   })
-  return result.rows.map(row => ({
-    id: row.id as string,
-    name: row.name as string,
-    description: (row.description as string) ?? '',
-    icon: (row.icon as string) ?? '🎁',
-    sharePercent: row.share_percent as number,
-    rewardTier: (row.reward_tier as string) ?? null,
-  }))
+
+  for (const row of result.rows) {
+    const campaignId = row.campaign_id as string
+    map.get(campaignId)!.push({
+      id: row.id as string,
+      name: row.name as string,
+      description: (row.description as string) ?? '',
+      icon: (row.icon as string) ?? '🎁',
+      sharePercent: row.share_percent as number,
+      rewardTier: (row.reward_tier as string) ?? null,
+    })
+  }
+
+  return map
 }
 
 async function fetchStats(campaignId: string) {
-  const result = await db.execute({
-    sql: `SELECT
-      (SELECT COUNT(*) FROM campaign_participations WHERE campaign_id = ?) AS current_users,
-      (SELECT COUNT(*) FROM game_plays WHERE campaign_id = ?) AS participations,
-      (SELECT COUNT(*) FROM game_plays WHERE campaign_id = ? AND won = 1) AS rewards_claimed,
-      (SELECT COUNT(*) FROM customer_rewards WHERE campaign_id = ? AND status = 'redeemed') AS redeemed_count`,
-    args: [campaignId, campaignId, campaignId, campaignId],
-  })
-  const row = result.rows[0] ?? {}
-  return {
-    currentUsers: Number(row.current_users ?? 0),
-    participations: Number(row.participations ?? 0),
-    rewardsClaimed: Number(row.rewards_claimed ?? 0),
-    redeemedCount: Number(row.redeemed_count ?? 0),
-  }
+  const batch = await fetchCampaignStatsBatch([campaignId])
+  return batch.get(campaignId) ?? emptyStats()
 }
 
 async function fetchCurrentUsers(campaignId: string): Promise<number> {
@@ -396,7 +464,7 @@ async function fetchCurrentUsers(campaignId: string): Promise<number> {
   return Number(result.rows[0]?.c ?? 0)
 }
 
-function mapRowToCampaignLite(
+export function mapRowToCampaignLite(
   row: Record<string, unknown>,
   currentUsers = 0,
 ): CampaignLite {
@@ -435,6 +503,43 @@ export async function getCampaignLiteById(campaignId: string): Promise<CampaignL
   const ensured = await ensureCampaignNotPastEnd(row as Record<string, unknown>)
   const currentUsers = await fetchCurrentUsers(campaignId)
   return mapRowToCampaignLite(ensured, currentUsers)
+}
+
+function mapRowToCampaignListRow(
+  row: Record<string, unknown>,
+  stats: CampaignStatsBundle,
+  rewards: CampaignReward[],
+): CampaignRow {
+  const id = row.id as string
+  const mechanic = row.mechanic as string
+  const userCap = row.user_cap as number
+  const overallWinners = Number(row.overall_winners ?? 0)
+    || Math.max(1, Math.round(userCap * (row.win_rate_percent as number) / 100))
+  return {
+    id,
+    businessId: row.business_id as string,
+    name: row.name as string,
+    mechanic,
+    status: row.status as string,
+    startDate: row.start_date as string,
+    endDate: row.end_date as string,
+    userCap,
+    perDayUserLimit: row.per_day_user_limit as number,
+    playsPerDay: row.plays_per_day as number,
+    overallWinners,
+    winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : 0,
+    pin: (row.pin as string) ?? null,
+    pinExpiresAt: (row.pin_expires_at as string) ?? null,
+    configJson: (row.config_json as string) ?? null,
+    claimPeriodDays: Number(row.claim_period_days ?? 30),
+    capFilledAt: (row.cap_filled_at as string) ?? null,
+    createdAt: row.created_at as string,
+    rewards,
+    currentUsers: stats.currentUsers,
+    participations: stats.participations,
+    rewardsClaimed: stats.rewardsClaimed,
+    redeemedCount: stats.redeemedCount,
+  }
 }
 
 async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow> {
@@ -650,7 +755,23 @@ export async function listCampaignsForBusiness(userId: string) {
     sql: 'SELECT * FROM campaigns WHERE business_id = ? ORDER BY created_at DESC',
     args: [businessId],
   })
-  return Promise.all(result.rows.map(row => rowToCampaign(row as Record<string, unknown>)))
+  const rows = result.rows as Record<string, unknown>[]
+  if (rows.length === 0) return []
+
+  const ids = rows.map(r => r.id as string)
+  const [statsMap, rewardsMap] = await Promise.all([
+    fetchCampaignStatsBatch(ids),
+    fetchRewardsBatch(ids),
+  ])
+
+  return rows.map(row => {
+    const id = row.id as string
+    return mapRowToCampaignListRow(
+      row,
+      statsMap.get(id) ?? emptyStats(),
+      rewardsMap.get(id) ?? [],
+    )
+  })
 }
 
 export async function updateCampaign(
@@ -1453,9 +1574,16 @@ interface EligibilityResult {
   blockReason: PlayBlockReason | null
 }
 
+export interface EligibilityContext {
+  participation?: Record<string, unknown> | null
+  totalUsers?: number
+  dailyNewUsers?: number
+}
+
 export async function checkEligibility(
   campaign: CampaignLite | CampaignRow,
   customerId: string,
+  ctx?: EligibilityContext,
 ): Promise<EligibilityResult> {
   const base = {
     playsPerDay: campaign.playsPerDay,
@@ -1487,10 +1615,12 @@ export async function checkEligibility(
     }
   }
 
-  const partResult = await db.execute({
-    sql: 'SELECT * FROM campaign_participations WHERE campaign_id = ? AND customer_id = ?',
-    args: [campaign.id, customerId],
-  })
+  const partResult = ctx?.participation !== undefined
+    ? { rows: ctx.participation ? [ctx.participation] : [] }
+    : await db.execute({
+        sql: 'SELECT * FROM campaign_participations WHERE campaign_id = ? AND customer_id = ?',
+        args: [campaign.id, customerId],
+      })
   const participation = partResult.rows[0]
   const isNewParticipant = !participation
 
@@ -1516,11 +1646,12 @@ export async function checkEligibility(
   }
 
   if (isNewParticipant) {
-    const totalUsers = await db.execute({
+    const totalUsers = ctx?.totalUsers ?? Number((await db.execute({
       sql: 'SELECT COUNT(*) as c FROM campaign_participations WHERE campaign_id = ?',
       args: [campaign.id],
-    })
-    if (Number(totalUsers.rows[0]?.c ?? 0) >= campaign.userCap) {
+    })).rows[0]?.c ?? 0)
+
+    if (totalUsers >= campaign.userCap) {
       return {
         ...base,
         canPlay: false,
@@ -1533,12 +1664,13 @@ export async function checkEligibility(
     }
 
     const dailyLimit = effectivePerDayUserLimit(campaign)
-    const dailyNew = await db.execute({
+    const dailyNew = ctx?.dailyNewUsers ?? Number((await db.execute({
       sql: `SELECT COUNT(*) as c FROM campaign_participations
             WHERE campaign_id = ? AND ${istDateSql('first_played_at')} = ?`,
       args: [campaign.id, today],
-    })
-    if (Number(dailyNew.rows[0]?.c ?? 0) >= dailyLimit) {
+    })).rows[0]?.c ?? 0)
+
+    if (dailyNew >= dailyLimit) {
       const isSingleDay = campaign.startDate === campaign.endDate
       return {
         ...base,

@@ -69,7 +69,7 @@ async function fetchLoyaltyCard(campaignId: string, customerId: string): Promise
   }
 }
 
-async function fetchMilestoneRewards(campaignId: string): Promise<(CampaignReward & { pointsThreshold: number })[]> {
+export async function fetchMilestoneRewards(campaignId: string): Promise<(CampaignReward & { pointsThreshold: number })[]> {
   const result = await db.execute({
     sql: `SELECT id, name, description, icon, share_percent, reward_tier
           FROM campaign_rewards
@@ -88,7 +88,7 @@ async function fetchMilestoneRewards(campaignId: string): Promise<(CampaignRewar
   }))
 }
 
-async function fetchAwardedRewardIds(loyaltyCardId: string): Promise<Set<string>> {
+export async function fetchAwardedRewardIds(loyaltyCardId: string): Promise<Set<string>> {
   const result = await db.execute({
     sql: 'SELECT reward_id FROM loyalty_milestone_awards WHERE loyalty_card_id = ?',
     args: [loyaltyCardId],
