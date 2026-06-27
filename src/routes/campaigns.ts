@@ -5,6 +5,7 @@ import {
   updateCampaignSchema,
   createCampaign,
   updateCampaign,
+  deleteCampaign,
   listCampaignsForBusiness,
   getCampaignForBusiness,
   getCampaignPinForBusiness,
@@ -231,6 +232,20 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to update campaign' })
+  }
+})
+
+router.delete('/:id', requireAuth, async (req, res) => {
+  try {
+    const summary = await deleteCampaign(req.user!.id, String(req.params.id))
+    res.json({ success: true, data: summary })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'DELETE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to delete campaign' })
   }
 })
 

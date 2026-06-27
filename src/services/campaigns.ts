@@ -837,6 +837,55 @@ export async function updateCampaign(
   return updated
 }
 
+export interface CampaignDeletionSummary {
+  id: string
+  name: string
+  participations: number
+  gamePlays: number
+  customerRewards: number
+  stampCards: number
+  loyaltyCards: number
+}
+
+/** Delete campaign and all related rows (DB cascades: rewards, plays, participations, cards, etc.). */
+export async function deleteCampaign(
+  userId: string,
+  campaignId: string,
+): Promise<CampaignDeletionSummary> {
+  const businessId = await getBusinessIdForUser(userId)
+  const owned = await db.execute({
+    sql: 'SELECT id, name FROM campaigns WHERE id = ? AND business_id = ?',
+    args: [campaignId, businessId],
+  })
+  const row = owned.rows[0] as { id: string; name: string } | undefined
+  if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+
+  const [participations, gamePlays, customerRewards, stampCards, loyaltyCards] = await Promise.all([
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM campaign_participations WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM game_plays WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM customer_rewards WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM stamp_cards WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM loyalty_cards WHERE campaign_id = ?', args: [campaignId] }),
+  ])
+
+  await db.execute({
+    sql: 'DELETE FROM campaigns WHERE id = ? AND business_id = ?',
+    args: [campaignId, businessId],
+  })
+
+  invalidateBusinessVendorCaches(businessId)
+
+  return {
+    id: row.id,
+    name: row.name,
+    participations: Number(participations.rows[0]?.c ?? 0),
+    gamePlays: Number(gamePlays.rows[0]?.c ?? 0),
+    customerRewards: Number(customerRewards.rows[0]?.c ?? 0),
+    stampCards: Number(stampCards.rows[0]?.c ?? 0),
+    loyaltyCards: Number(loyaltyCards.rows[0]?.c ?? 0),
+  }
+}
+
 async function updateShakeCampaign(
   userId: string,
   existing: CampaignRow,
