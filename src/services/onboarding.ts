@@ -88,7 +88,7 @@ export async function completeOnboarding(
         city, pincode, landmark, address, map_link, operating_hours, weekly_off,
         brand_color, instagram, facebook, website, google_review,
         logo_url, cover_banner_url, interior_photo_urls, exterior_photo_urls, qr_slug
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         businessId, userId, payload.name, payload.tagline, payload.description, payload.businessType,
         payload.ownerName, payload.mobile, payload.whatsapp, payload.email,
