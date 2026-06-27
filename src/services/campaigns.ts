@@ -993,9 +993,9 @@ export async function getCampaignPinForBusiness(userId: string, campaignId: stri
   })
   if (!owned.rows[0]) throw new Error('CAMPAIGN_NOT_FOUND')
 
-  const refreshed = await rotatePinIfExpired(campaignId)
+  let refreshed = await rotatePinIfExpired(campaignId)
   const cycleSeconds = pinCycleSecondsForMechanic(refreshed.mechanic)
-  const pinActive = refreshed.mechanic === 'stamp'
+  let pinActive = refreshed.mechanic === 'stamp'
     ? isPinActiveForStamp(
         refreshed.status,
         refreshed.startDate,
@@ -1004,9 +1004,19 @@ export async function getCampaignPinForBusiness(userId: string, campaignId: stri
         refreshed.capFilledAt,
       )
     : refreshed.status === 'active'
-  const secondsRemaining = refreshed.pinExpiresAt && pinActive
+
+  let secondsRemaining = refreshed.pinExpiresAt && pinActive
     ? computePinSecondsRemaining(refreshed.pinExpiresAt)
     : 0
+
+  // Belt-and-suspenders: if still expired after rotate, force one more pass
+  if (pinActive && secondsRemaining <= 0) {
+    refreshed = await rotatePinIfExpired(campaignId)
+    secondsRemaining = refreshed.pinExpiresAt
+      ? computePinSecondsRemaining(refreshed.pinExpiresAt)
+      : 0
+  }
+
   return {
     pin: pinActive ? refreshed.pin : null,
     expiresAt: pinActive ? refreshed.pinExpiresAt : null,

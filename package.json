@@ -21,6 +21,7 @@
     "audit:api": "tsx scripts/audit-api-performance.ts",
     "audit:vendor": "tsx scripts/audit-vendor-flows.ts",
     "audit:customer": "tsx scripts/audit-customer-flows.ts",
+    "audit:pin-rotation": "tsx scripts/audit-pin-rotation.ts",
     "db:seed-profiles": "tsx scripts/seed-business-profiles.ts",
     "test:shake": "tsx scripts/test-shake-win.ts",
     "test:stamp": "tsx scripts/test-stamp-cards.ts",
