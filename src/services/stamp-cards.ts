@@ -7,7 +7,6 @@ import {
 } from '../utils/campaign-dates.js'
 import {
   verifyPlaySession,
-  getCampaignById,
   getCampaignLiteById,
   type CampaignReward,
 } from './campaigns.js'
@@ -179,18 +178,67 @@ async function fetchStampCard(campaignId: string, customerId: string): Promise<S
 }
 
 async function fetchTierRewards(campaignId: string, tier: 'surprise' | 'big'): Promise<CampaignReward[]> {
+  const batch = await fetchStampTierRewards(campaignId)
+  return tier === 'surprise' ? batch.surprise : batch.big
+}
+
+async function fetchStampTierRewards(campaignId: string): Promise<{
+  surprise: CampaignReward[]
+  big: CampaignReward[]
+}> {
   const result = await db.execute({
-    sql: `SELECT id, name, description, icon, share_percent FROM campaign_rewards
-          WHERE campaign_id = ? AND reward_tier = ? ORDER BY sort_order ASC`,
-    args: [campaignId, tier],
+    sql: `SELECT id, name, description, icon, share_percent, reward_tier FROM campaign_rewards
+          WHERE campaign_id = ? AND reward_tier IN ('surprise', 'big')
+          ORDER BY sort_order ASC`,
+    args: [campaignId],
   })
-  return result.rows.map(row => ({
-    id: row.id as string,
-    name: row.name as string,
-    description: (row.description as string) ?? '',
-    icon: (row.icon as string) ?? '🎁',
-    sharePercent: row.share_percent as number,
-  }))
+  const surprise: CampaignReward[] = []
+  const big: CampaignReward[] = []
+  for (const row of result.rows) {
+    const reward: CampaignReward = {
+      id: row.id as string,
+      name: row.name as string,
+      description: (row.description as string) ?? '',
+      icon: (row.icon as string) ?? '🎁',
+      sharePercent: row.share_percent as number,
+    }
+    if (row.reward_tier === 'surprise') surprise.push(reward)
+    else if (row.reward_tier === 'big') big.push(reward)
+  }
+  return { surprise, big }
+}
+
+function rowToStampCardFromInsert(
+  cardId: string,
+  campaignId: string,
+  customerId: string,
+  initialStamps: number,
+  surpriseTriggerAt: number,
+  bigTriggerAt: number,
+): StampCardRow {
+  return {
+    id: cardId,
+    campaignId,
+    customerId,
+    stampsCollected: initialStamps,
+    surpriseTriggerAt,
+    bigTriggerAt,
+    surpriseAwarded: false,
+    bigAwarded: false,
+    status: 'active',
+    enrolledAt: new Date().toISOString(),
+    completedAt: null,
+    expiredAt: null,
+    lastStampDate: null,
+  }
+}
+
+function applyTriggerFlagsToCard(card: StampCardRow, tier: 'surprise' | 'big'): void {
+  if (tier === 'surprise') {
+    card.surpriseAwarded = true
+  } else {
+    card.bigAwarded = true
+  }
 }
 
 export function rollPoolReward(rewards: CampaignReward[]): CampaignReward | null {
@@ -363,18 +411,23 @@ export async function executeStampCollect(
     throw new Error('INVALID_PLAY_SESSION')
   }
 
-  const campaign = await getCampaignById(campaignId)
+  const today = todayInCampaignTz()
+
+  const [campaign, cardInitial, tierRewards] = await Promise.all([
+    getCampaignLiteById(campaignId),
+    fetchStampCard(campaignId, customerId),
+    fetchStampTierRewards(campaignId),
+  ])
+
   if (campaign.mechanic !== 'stamp') throw new Error('NOT_STAMP_CAMPAIGN')
 
-  const raw = await db.execute({
-    sql: 'SELECT config_json, claim_period_days, cap_filled_at, status FROM campaigns WHERE id = ?',
-    args: [campaignId],
+  const meta = parseStampCampaignMeta({
+    config_json: campaign.configJson,
+    claim_period_days: campaign.claimPeriodDays,
+    cap_filled_at: campaign.capFilledAt,
   })
-  const row = raw.rows[0] as Record<string, unknown>
-  const meta = parseStampCampaignMeta(row)
   if (!meta) throw new Error('INVALID_STAMP_CONFIG')
 
-  const today = todayInCampaignTz()
   const claimDeadline = getClaimDeadline(
     campaign.endDate,
     meta.claimPeriodDays,
@@ -392,11 +445,11 @@ export async function executeStampCollect(
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
 
-  if (claimDeadline) {
+  if (claimDeadline && today > claimDeadline) {
     await expireStaleCards(campaignId, claimDeadline, today)
   }
 
-  let card = await fetchStampCard(campaignId, customerId)
+  let card = cardInitial
   const isNew = !card
 
   if (isNew) {
@@ -432,18 +485,16 @@ export async function executeStampCollect(
       },
     ])
 
-    card = (await fetchStampCard(campaignId, customerId))!
-    await maybeMarkCapFilled(campaignId, campaign.userCap)
+    card = rowToStampCardFromInsert(
+      cardId, campaignId, customerId, initialStamps, surpriseTriggerAt, bigTriggerAt,
+    )
+    void maybeMarkCapFilled(campaignId, campaign.userCap)
 
-    // Evaluate prefill triggers
-    const surpriseRewards = await fetchTierRewards(campaignId, 'surprise')
-    const bigRewards = await fetchTierRewards(campaignId, 'big')
     const prefillTriggers = await evaluateTriggers(
-      card, campaignId, customerId, meta.config, surpriseRewards, bigRewards,
+      card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
     )
     if (prefillTriggers.length > 0) {
       await applyTriggerResults(card, campaignId, customerId, prefillTriggers)
-      card = (await fetchStampCard(campaignId, customerId))!
     }
   } else {
     if (!card) throw new Error('CARD_NOT_FOUND')
@@ -455,9 +506,8 @@ export async function executeStampCollect(
 
   if (!card) throw new Error('CARD_NOT_FOUND')
 
-  // Add visit stamp (+1)
   const newStampCount = Math.min(card.stampsCollected + 1, meta.config.totalStamps)
-  const statements: { sql: string; args: (string | number | null)[] }[] = [
+  await db.batch([
     {
       sql: `UPDATE stamp_cards SET stamps_collected = ?, last_stamp_date = ? WHERE id = ?`,
       args: [newStampCount, today, card.id],
@@ -473,19 +523,15 @@ export async function executeStampCollect(
             VALUES (?, ?, ?, 'stamp', 0, NULL, NULL, NULL)`,
       args: [nanoid(), campaignId, customerId],
     },
-  ]
+  ])
 
-  await db.batch(statements)
+  card.stampsCollected = newStampCount
+  card.lastStampDate = today
 
-  card = (await fetchStampCard(campaignId, customerId))!
-  const surpriseRewards = await fetchTierRewards(campaignId, 'surprise')
-  const bigRewards = await fetchTierRewards(campaignId, 'big')
   const triggers = await evaluateTriggers(
-    card, campaignId, customerId, meta.config, surpriseRewards, bigRewards,
+    card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
   )
   const triggerOutcomes = await applyTriggerResults(card, campaignId, customerId, triggers)
-
-  card = (await fetchStampCard(campaignId, customerId))!
 
   if (card.stampsCollected >= meta.config.totalStamps && card.status === 'active') {
     await db.execute({
@@ -528,23 +574,22 @@ async function applyTriggerResults(
   triggers: TriggerResult[],
 ): Promise<AppliedTrigger[]> {
   const applied: AppliedTrigger[] = []
+  const statements: { sql: string; args: (string | number | null)[] }[] = []
 
   for (const t of triggers) {
     if (!t.tier || !t.playId) continue
 
-    const statements: { sql: string; args: (string | number | null)[] }[] = [
-      {
-        sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
-              VALUES (?, ?, ?, 'stamp', ?, ?, ?, ?)`,
-        args: [
-          t.playId, campaignId, customerId,
-          t.won ? 1 : 0,
-          t.reward?.id ?? null,
-          t.reward?.name ?? (t.won ? 'Reward' : 'No win'),
-          t.code,
-        ],
-      },
-    ]
+    statements.push({
+      sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
+            VALUES (?, ?, ?, 'stamp', ?, ?, ?, ?)`,
+      args: [
+        t.playId, campaignId, customerId,
+        t.won ? 1 : 0,
+        t.reward?.id ?? null,
+        t.reward?.name ?? (t.won ? 'Reward' : 'No win'),
+        t.code,
+      ],
+    })
 
     if (t.tier === 'surprise') {
       statements.push({
@@ -567,13 +612,17 @@ async function applyTriggerResults(
       })
     }
 
-    await db.batch(statements)
+    applyTriggerFlagsToCard(card, t.tier)
     applied.push({
       tier: t.tier,
       won: t.won,
       reward: t.reward,
       code: t.code,
     })
+  }
+
+  if (statements.length > 0) {
+    await db.batch(statements)
   }
 
   return applied
