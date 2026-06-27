@@ -8,6 +8,7 @@ import {
 import {
   verifyPlaySession,
   getCampaignById,
+  getCampaignLiteById,
   type CampaignReward,
 } from './campaigns.js'
 import {
@@ -279,15 +280,14 @@ async function maybeMarkCapFilled(campaignId: string, userCap: number): Promise<
 }
 
 export async function getStampState(campaignId: string, customerId: string) {
-  const campaign = await getCampaignById(campaignId)
+  const campaign = await getCampaignLiteById(campaignId)
   if (campaign.mechanic !== 'stamp') throw new Error('NOT_STAMP_CAMPAIGN')
 
-  const raw = await db.execute({
-    sql: 'SELECT config_json, claim_period_days, cap_filled_at FROM campaigns WHERE id = ?',
-    args: [campaignId],
+  const meta = parseStampCampaignMeta({
+    config_json: campaign.configJson,
+    claim_period_days: campaign.claimPeriodDays,
+    cap_filled_at: campaign.capFilledAt,
   })
-  const row = raw.rows[0] as Record<string, unknown>
-  const meta = parseStampCampaignMeta(row)
   if (!meta) throw new Error('INVALID_STAMP_CONFIG')
 
   const today = todayInCampaignTz()

@@ -75,7 +75,7 @@ export function isCampaignPastEnd(endDate: string, today = todayInCampaignTz()):
   return today > endDate
 }
 
-/** SQLite expression: UTC datetime column → calendar date in IST. */
+/** Calendar date of a UTC timestamp column in Asia/Kolkata (Postgres). */
 export function istDateSql(column: string): string {
-  return `date(${column}, '+5 hours', '+30 minutes')`
+  return `((${column})::timestamptz AT TIME ZONE 'Asia/Kolkata')::date`
 }

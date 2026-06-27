@@ -8,7 +8,19 @@
     "prestart": "npm run build",
     "start": "node dist/index.js",
     "build": "tsc",
-    "db:migrate": "tsx src/db/migrate.ts",
+    "db:apply-schema": "tsx scripts/apply-schema.ts",
+    "db:enable-realtime": "tsx scripts/apply-realtime.ts",
+    "db:enable-realtime-extended": "tsx scripts/apply-realtime-extended.ts",
+    "db:drop-blobs": "tsx scripts/apply-drop-blobs.ts",
+    "db:cleanup": "tsx scripts/cleanup-supabase.ts",
+    "r2:cleanup": "tsx scripts/cleanup-r2.ts",
+    "r2:configure-cors": "tsx scripts/configure-r2-cors.ts",
+    "db:import": "tsx scripts/import-turso-sqlite.ts",
+    "verify:infra": "tsx scripts/verify-infra.ts",
+    "audit:db": "tsx scripts/audit-prod-readiness.ts",
+    "audit:api": "tsx scripts/audit-api-performance.ts",
+    "audit:vendor": "tsx scripts/audit-vendor-flows.ts",
+    "audit:customer": "tsx scripts/audit-customer-flows.ts",
     "db:seed-profiles": "tsx scripts/seed-business-profiles.ts",
     "test:shake": "tsx scripts/test-shake-win.ts",
     "test:stamp": "tsx scripts/test-stamp-cards.ts",
@@ -22,7 +34,8 @@
     "test:customer:live": "tsx scripts/test-customer-live-e2e.ts"
   },
   "dependencies": {
-    "@libsql/client": "^0.14.0",
+    "@aws-sdk/client-s3": "^3.1075.0",
+    "@aws-sdk/s3-request-presigner": "^3.1075.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
@@ -30,16 +43,22 @@
     "@types/node": "^20",
     "@types/qrcode": "^1.5.5",
     "bcryptjs": "^3.0.3",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.3",
     "nanoid": "^5.1.0",
+    "pg": "^8.22.0",
     "qrcode": "^1.5.4",
     "typescript": "^5",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/compression": "^1.8.1",
+    "@types/pg": "^8.20.0",
+    "better-sqlite3": "^12.11.1",
     "tsx": "^4.19.3"
   }
 }

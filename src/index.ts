@@ -1,13 +1,16 @@
+import compression from 'compression'
 import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
-import { migrate } from './db/migrate.js'
+import { verifyDatabaseConnection } from './db/client.js'
 import { getMsg91SetupStatus } from './services/msg91.js'
 import onboardingRoutes from './routes/onboarding.js'
 import authRoutes from './routes/auth.js'
 import businessRoutes from './routes/business.js'
 import campaignRoutes from './routes/campaigns.js'
 import customerRoutes from './routes/customer.js'
+import uploadRoutes from './routes/uploads.js'
+import { startPinScheduler } from './services/pin-scheduler.js'
 import { normalizeFrontendOrigin, parseFrontendOrigins } from './utils/frontend-url.js'
 
 dotenv.config()
@@ -104,7 +107,8 @@ app.use(cors({
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }))
-app.use(express.json({ limit: '15mb' }))
+app.use(compression())
+app.use(express.json({ limit: '1mb' }))
 
 app.get('/api/health', (_req, res) => {
   const msg91 = getMsg91SetupStatus()
@@ -121,11 +125,15 @@ app.use('/api/auth', authRoutes)
 app.use('/api/business', businessRoutes)
 app.use('/api/campaigns', campaignRoutes)
 app.use('/api/customer', customerRoutes)
+app.use('/api/uploads', uploadRoutes)
 
 async function start() {
-  await migrate()
+  await verifyDatabaseConnection()
+  startPinScheduler()
   app.listen(PORT, () => {
     console.log(`LoyalGenie API running on http://localhost:${PORT}`)
+    console.log(`Database: Supabase Postgres`)
+    console.log(`PIN scheduler: active (server-side rotation for Realtime)`)
     console.log(`CORS allowed origins: ${allowedOrigins.join(', ')} (+ localhost:* in dev)`)
   })
 }

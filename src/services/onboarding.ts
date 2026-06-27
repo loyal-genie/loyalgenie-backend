@@ -5,6 +5,7 @@ import { db } from '../db/client.js'
 import { createBusinessUser, getBusinessForUser } from './auth.js'
 import { uniqueCafeSlug } from '../utils/slug.js'
 import { buildCustomerJoinUrl } from '../utils/frontend-url.js'
+import { normalizePhotoArrayInput, normalizeSingleImageInput } from '../utils/media-input.js'
 
 const uploadArraySchema = z.array(z.string()).optional().default([])
 
@@ -75,24 +76,29 @@ export async function completeOnboarding(
   const branchAddress = payload.branchAddress || payload.address
   const branchId = nanoid()
 
+  const logo = normalizeSingleImageInput(payload.logoData)
+  const cover = normalizeSingleImageInput(payload.coverBannerData)
+  const interior = normalizePhotoArrayInput(payload.interiorPhotosData)
+  const exterior = normalizePhotoArrayInput(payload.exteriorPhotosData)
+
   await db.batch([
     {
       sql: `INSERT INTO businesses (
         id, user_id, name, tagline, description, business_type, owner_name, mobile, whatsapp, email,
         city, pincode, landmark, address, map_link, operating_hours, weekly_off,
         brand_color, instagram, facebook, website, google_review,
-        logo_data, cover_banner_data, interior_photos_data, exterior_photos_data, qr_slug
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        logo_url, cover_banner_url, interior_photo_urls, exterior_photo_urls, qr_slug
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         businessId, userId, payload.name, payload.tagline, payload.description, payload.businessType,
         payload.ownerName, payload.mobile, payload.whatsapp, payload.email,
         payload.city, payload.pincode, payload.landmark, payload.address, payload.mapLink,
         payload.operatingHours, payload.weeklyOff, payload.brandColor,
         payload.instagram, payload.facebook, payload.website, payload.googleReview,
-        payload.logoData || null,
-        payload.coverBannerData || null,
-        JSON.stringify(payload.interiorPhotosData ?? []),
-        JSON.stringify(payload.exteriorPhotosData ?? []),
+        logo.url,
+        cover.url,
+        JSON.stringify(interior.urls),
+        JSON.stringify(exterior.urls),
         qrSlug,
       ],
     },
