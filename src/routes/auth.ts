@@ -65,7 +65,9 @@ const emailSchema = z.object({
 
 const otpSendSchema = phoneSchema
 
-const emailOtpSendSchema = emailSchema
+const emailOtpSendSchema = emailSchema.extend({
+  intent: z.enum(['signin', 'signup']).optional().default('signin'),
+})
 
 const otpLoginSchema = phoneSchema.extend({
   otp: z.string().length(6, 'Enter the 6-digit OTP'),
@@ -95,7 +97,19 @@ router.post('/business/otp/send', async (req, res) => {
       })
     }
 
-    await sendEmailOtp(parsed.data.email)
+    const { email, intent } = parsed.data
+
+    if (intent === 'signin') {
+      const existing = await resolveBusinessUserByEmail(email)
+      if (!existing) {
+        return res.status(404).json({
+          error: 'No account found for this email. Please sign up to create a business account.',
+          code: 'ACCOUNT_NOT_FOUND',
+        })
+      }
+    }
+
+    await sendEmailOtp(email)
     res.json({ success: true, message: 'OTP sent to your email' })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'OTP_SEND_FAILED'
