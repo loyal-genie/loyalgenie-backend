@@ -5,6 +5,7 @@ import {
   updateCampaignSchema,
   createCampaign,
   updateCampaign,
+  deleteCampaign,
   listCampaignsForBusiness,
   getCampaignForBusiness,
   getCampaignPinForBusiness,
@@ -21,6 +22,7 @@ import {
 import {
   getStampState,
   executeStampCollect,
+  executeStampCollectWithPin,
 } from '../services/stamp-cards.js'
 import {
   getLoyaltyState,
@@ -28,6 +30,7 @@ import {
   getPendingCheckInPrompt,
   listCustomerLoyaltyProfiles,
 } from '../services/check-in-loyalty.js'
+import { getBusinessCampaignStates } from '../services/business-campaign-states.js'
 
 const router = Router()
 
@@ -36,10 +39,21 @@ const router = Router()
 router.get('/public/businesses', async (_req, res) => {
   try {
     const businesses = await listBusinessesWithActiveCampaigns()
+    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120')
     res.json({ success: true, data: businesses })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to list businesses' })
+  }
+})
+
+router.get('/public/businesses/:businessId/states', requireCustomerAuth, async (req, res) => {
+  try {
+    const states = await getBusinessCampaignStates(String(req.params.businessId), req.user!.id)
+    res.json({ success: true, data: states })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Failed to fetch campaign states' })
   }
 })
 
@@ -133,11 +147,19 @@ router.post('/', requireAuth, async (req, res) => {
     if (message === 'REWARD_SHARES_MUST_SUM_100') {
       return res.status(422).json({ error: 'Reward shares must sum to exactly 100%' })
     }
+    if (message === 'OVERALL_WINNERS_EXCEEDS_USER_CAP') {
+      return res.status(422).json({ error: 'Overall winners cannot exceed user cap' })
+    }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL' || message === 'INVALID_LOYALTY_MILESTONES') {
       return res.status(422).json({ error: message === 'INVALID_LOYALTY_MILESTONES' ? 'Milestone point thresholds must be unique' : 'Invalid stamp card configuration' })
     }
-    console.error(err)
-    res.status(500).json({ error: 'Failed to create campaign' })
+    console.error('Create campaign failed:', err)
+    res.status(500).json({
+      error: 'Failed to create campaign',
+      details: process.env.NODE_ENV !== 'production' && err instanceof Error
+        ? { server: [err.message] }
+        : undefined,
+    })
   }
 })
 
@@ -219,6 +241,20 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to update campaign' })
+  }
+})
+
+router.delete('/:id', requireAuth, async (req, res) => {
+  try {
+    const summary = await deleteCampaign(req.user!.id, String(req.params.id))
+    res.json({ success: true, data: summary })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'DELETE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'BUSINESS_NOT_FOUND') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to delete campaign' })
   }
 })
 
@@ -304,14 +340,26 @@ router.get('/:id/stamp-state', requireCustomerAuth, async (req, res) => {
 
 router.post('/:id/stamp', requireCustomerAuth, async (req, res) => {
   try {
+    const pin = String(req.body?.pin ?? '').trim()
     const playSessionToken = String(req.body?.playSessionToken ?? '')
-    if (!playSessionToken) {
-      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    const campaignId = String(req.params.id)
+    const customerId = req.user!.id
+
+    let result
+    if (pin) {
+      result = await executeStampCollectWithPin(campaignId, customerId, pin)
+    } else if (playSessionToken) {
+      result = await executeStampCollect(campaignId, customerId, playSessionToken)
+    } else {
+      return res.status(422).json({ error: 'PIN or play session required' })
     }
-    const result = await executeStampCollect(String(req.params.id), req.user!.id, playSessionToken)
+
     res.json({ success: true, data: result })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'STAMP_FAILED'
+    if (message === 'INVALID_PIN') {
+      return res.status(401).json({ error: 'Wrong PIN. Ask staff for the current PIN.' })
+    }
     if (message === 'INVALID_PLAY_SESSION') {
       return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
     }

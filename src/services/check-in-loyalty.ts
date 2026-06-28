@@ -3,7 +3,7 @@ import { db } from '../db/client.js'
 import { todayInCampaignTz } from '../utils/campaign-dates.js'
 import {
   verifyPlaySession,
-  getCampaignById,
+  getCampaignLiteById,
   type CampaignReward,
 } from './campaigns.js'
 import {
@@ -68,26 +68,44 @@ async function fetchLoyaltyCard(campaignId: string, customerId: string): Promise
   }
 }
 
-async function fetchMilestoneRewards(campaignId: string): Promise<(CampaignReward & { pointsThreshold: number })[]> {
-  const result = await db.execute({
-    sql: `SELECT id, name, description, icon, share_percent, reward_tier
-          FROM campaign_rewards
-          WHERE campaign_id = ? AND reward_tier = 'milestone'
-          ORDER BY share_percent ASC`,
-    args: [campaignId],
-  })
-  return result.rows.map(row => ({
-    id: row.id as string,
-    name: row.name as string,
-    description: (row.description as string) ?? '',
-    icon: (row.icon as string) ?? '🎁',
-    sharePercent: row.share_percent as number,
-    rewardTier: row.reward_tier as string,
-    pointsThreshold: row.share_percent as number,
-  }))
+export async function fetchMilestoneRewards(campaignId: string): Promise<(CampaignReward & { pointsThreshold: number })[]> {
+  const batch = await fetchMilestoneRewardsBatch([campaignId])
+  return batch.get(campaignId) ?? []
 }
 
-async function fetchAwardedRewardIds(loyaltyCardId: string): Promise<Set<string>> {
+export async function fetchMilestoneRewardsBatch(
+  campaignIds: string[],
+): Promise<Map<string, (CampaignReward & { pointsThreshold: number })[]>> {
+  const map = new Map<string, (CampaignReward & { pointsThreshold: number })[]>()
+  if (campaignIds.length === 0) return map
+  for (const id of campaignIds) map.set(id, [])
+
+  const placeholders = campaignIds.map(() => '?').join(', ')
+  const result = await db.execute({
+    sql: `SELECT campaign_id, id, name, description, icon, share_percent, reward_tier
+          FROM campaign_rewards
+          WHERE campaign_id IN (${placeholders}) AND reward_tier = 'milestone'
+          ORDER BY campaign_id ASC, share_percent ASC`,
+    args: campaignIds,
+  })
+
+  for (const row of result.rows) {
+    const campaignId = row.campaign_id as string
+    map.get(campaignId)!.push({
+      id: row.id as string,
+      name: row.name as string,
+      description: (row.description as string) ?? '',
+      icon: (row.icon as string) ?? '🎁',
+      sharePercent: row.share_percent as number,
+      rewardTier: row.reward_tier as string,
+      pointsThreshold: row.share_percent as number,
+    })
+  }
+
+  return map
+}
+
+export async function fetchAwardedRewardIds(loyaltyCardId: string): Promise<Set<string>> {
   const result = await db.execute({
     sql: 'SELECT reward_id FROM loyalty_milestone_awards WHERE loyalty_card_id = ?',
     args: [loyaltyCardId],
@@ -95,15 +113,18 @@ async function fetchAwardedRewardIds(loyaltyCardId: string): Promise<Set<string>
   return new Set(result.rows.map(r => r.reward_id as string))
 }
 
+type MilestoneReward = CampaignReward & { pointsThreshold: number }
+
 async function awardNewMilestones(
   card: LoyaltyCardRow,
   campaignId: string,
   customerId: string,
   loyaltyPoints: number,
+  milestones: MilestoneReward[],
+  awarded: Set<string>,
 ): Promise<{ reward: CampaignReward; code: string }[]> {
-  const milestones = await fetchMilestoneRewards(campaignId)
-  const awarded = await fetchAwardedRewardIds(card.id)
   const newlyUnlocked: { reward: CampaignReward; code: string }[] = []
+  const statements: { sql: string; args: unknown[] }[] = []
 
   for (const milestone of milestones) {
     if (loyaltyPoints < milestone.pointsThreshold) continue
@@ -112,7 +133,7 @@ async function awardNewMilestones(
     const playId = nanoid()
     const code = generateRedemptionCode(customerId)
 
-    await db.batch([
+    statements.push(
       {
         sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
               VALUES (?, ?, ?, 'check-in-loyalty', 1, ?, ?, ?)`,
@@ -129,9 +150,13 @@ async function awardNewMilestones(
               VALUES (?, ?, ?, ?, datetime('now'))`,
         args: [nanoid(), card.id, milestone.id, playId],
       },
-    ])
+    )
 
     newlyUnlocked.push({ reward: milestone, code })
+  }
+
+  if (statements.length > 0) {
+    await db.batch(statements)
   }
 
   return newlyUnlocked
@@ -156,7 +181,7 @@ export interface LoyaltyState {
 }
 
 export async function getLoyaltyState(campaignId: string, customerId: string): Promise<LoyaltyState> {
-  const campaign = await getCampaignById(campaignId)
+  const campaign = await getCampaignLiteById(campaignId)
   if (campaign.mechanic !== 'check-in-loyalty') throw new Error('NOT_LOYALTY_CAMPAIGN')
 
   const config = parseCheckInConfig(campaign.configJson)
@@ -311,30 +336,36 @@ export async function executeCheckIn(
     throw new Error('INVALID_PLAY_SESSION')
   }
 
-  const campaign = await getCampaignById(campaignId)
+  const today = todayInCampaignTz()
+
+  const [campaign, cardInitial, milestones] = await Promise.all([
+    getCampaignLiteById(campaignId),
+    fetchLoyaltyCard(campaignId, customerId),
+    fetchMilestoneRewards(campaignId),
+  ])
+
   if (campaign.mechanic !== 'check-in-loyalty') throw new Error('NOT_LOYALTY_CAMPAIGN')
 
   const config = parseCheckInConfig(campaign.configJson)
   if (!config) throw new Error('INVALID_LOYALTY_CONFIG')
 
-  const today = todayInCampaignTz()
   if (campaign.status !== 'active' || today < campaign.startDate || today > campaign.endDate) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
 
-  let card = await fetchLoyaltyCard(campaignId, customerId)
-  const isNew = !card
+  const isNew = !cardInitial
 
   if (isNew) {
     if (campaign.currentUsers >= campaign.userCap) {
       throw new Error('USER_CAP_REACHED')
     }
-  } else if (card!.lastCheckInDate === today) {
+  } else if (cardInitial!.lastCheckInDate === today) {
     throw new Error('ALREADY_CHECKED_IN_TODAY')
   }
 
   const pointsEarned = asInt(config.pointsPerCheckIn)
   const playId = nanoid()
+  let card: LoyaltyCardRow
 
   if (isNew) {
     const cardId = nanoid()
@@ -358,15 +389,25 @@ export async function executeCheckIn(
         args: [playId, campaignId, customerId],
       },
     ])
-    card = (await fetchLoyaltyCard(campaignId, customerId))!
+    card = {
+      id: cardId,
+      campaignId,
+      customerId,
+      loyaltyPoints: pointsEarned,
+      totalCheckIns: 1,
+      lastCheckInDate: today,
+      status: 'active',
+      enrolledAt: today,
+    }
   } else {
-    const newPoints = card!.loyaltyPoints + pointsEarned
+    const existing = cardInitial!
+    const newPoints = existing.loyaltyPoints + pointsEarned
     await db.batch([
       {
         sql: `UPDATE loyalty_cards
               SET loyalty_points = ?, total_check_ins = total_check_ins + 1, last_check_in_date = ?
               WHERE id = ?`,
-        args: [newPoints, today, card!.id],
+        args: [newPoints, today, existing.id],
       },
       {
         sql: `UPDATE campaign_participations
@@ -380,10 +421,26 @@ export async function executeCheckIn(
         args: [playId, campaignId, customerId],
       },
     ])
-    card = (await fetchLoyaltyCard(campaignId, customerId))!
+    card = {
+      ...existing,
+      loyaltyPoints: newPoints,
+      totalCheckIns: existing.totalCheckIns + 1,
+      lastCheckInDate: today,
+    }
   }
 
-  const milestonesUnlocked = await awardNewMilestones(card, campaignId, customerId, card.loyaltyPoints)
+  const awarded = isNew
+    ? new Set<string>()
+    : await fetchAwardedRewardIds(card.id)
+
+  const milestonesUnlocked = await awardNewMilestones(
+    card,
+    campaignId,
+    customerId,
+    card.loyaltyPoints,
+    milestones,
+    awarded,
+  )
 
   return {
     enrolled: isNew,

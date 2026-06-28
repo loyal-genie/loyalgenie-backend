@@ -7,8 +7,11 @@ import {
 } from '../utils/campaign-dates.js'
 import {
   verifyPlaySession,
-  getCampaignById,
+  getCampaignLiteById,
+  normalizePin,
+  isPinValidForVerify,
   type CampaignReward,
+  type PinVerificationRow,
 } from './campaigns.js'
 import {
   stampConfigSchema,
@@ -168,6 +171,64 @@ function rowToStampCard(row: Record<string, unknown>): StampCardRow {
   }
 }
 
+type SqlStatement = { sql: string; args: (string | number | null)[] }
+
+async function fetchCampaignRowById(campaignId: string): Promise<Record<string, unknown>> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM campaigns WHERE id = ?',
+    args: [campaignId],
+  })
+  const row = result.rows[0]
+  if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+  return row as Record<string, unknown>
+}
+
+async function fetchParticipationCount(campaignId: string): Promise<number> {
+  const result = await db.execute({
+    sql: 'SELECT COUNT(*) as c FROM campaign_participations WHERE campaign_id = ?',
+    args: [campaignId],
+  })
+  return Number(result.rows[0]?.c ?? 0)
+}
+
+function verifyStampPinOnRow(row: Record<string, unknown>, pin: string): void {
+  const normalizedPin = normalizePin(pin)
+  if (!/^\d{3}$/.test(normalizedPin)) {
+    throw new Error('INVALID_PIN')
+  }
+
+  const today = todayInCampaignTz()
+  const status = row.status as string
+  const startDate = row.start_date as string
+  const endDate = row.end_date as string
+  const mechanic = row.mechanic as string
+
+  if (mechanic !== 'stamp') throw new Error('NOT_STAMP_CAMPAIGN')
+
+  if (!isStampCampaignActive(
+    status,
+    startDate,
+    endDate,
+    Number(row.claim_period_days ?? 30),
+    (row.cap_filled_at as string) ?? null,
+    today,
+  )) {
+    throw new Error('CAMPAIGN_NOT_ACTIVE')
+  }
+
+  const pinState: PinVerificationRow = {
+    pin: (row.pin as string | null) ?? null,
+    pinExpiresAt: (row.pin_expires_at as string | null) ?? null,
+    previousPin: (row.previous_pin as string | null) ?? null,
+    previousPinValidUntil: (row.previous_pin_valid_until as string | null) ?? null,
+    mechanic,
+  }
+
+  if (!isPinValidForVerify(normalizedPin, pinState, nowInCampaignTz())) {
+    throw new Error('INVALID_PIN')
+  }
+}
+
 async function fetchStampCard(campaignId: string, customerId: string): Promise<StampCardRow | null> {
   const result = await db.execute({
     sql: 'SELECT * FROM stamp_cards WHERE campaign_id = ? AND customer_id = ?',
@@ -178,18 +239,67 @@ async function fetchStampCard(campaignId: string, customerId: string): Promise<S
 }
 
 async function fetchTierRewards(campaignId: string, tier: 'surprise' | 'big'): Promise<CampaignReward[]> {
+  const batch = await fetchStampTierRewards(campaignId)
+  return tier === 'surprise' ? batch.surprise : batch.big
+}
+
+async function fetchStampTierRewards(campaignId: string): Promise<{
+  surprise: CampaignReward[]
+  big: CampaignReward[]
+}> {
   const result = await db.execute({
-    sql: `SELECT id, name, description, icon, share_percent FROM campaign_rewards
-          WHERE campaign_id = ? AND reward_tier = ? ORDER BY sort_order ASC`,
-    args: [campaignId, tier],
+    sql: `SELECT id, name, description, icon, share_percent, reward_tier FROM campaign_rewards
+          WHERE campaign_id = ? AND reward_tier IN ('surprise', 'big')
+          ORDER BY sort_order ASC`,
+    args: [campaignId],
   })
-  return result.rows.map(row => ({
-    id: row.id as string,
-    name: row.name as string,
-    description: (row.description as string) ?? '',
-    icon: (row.icon as string) ?? '🎁',
-    sharePercent: row.share_percent as number,
-  }))
+  const surprise: CampaignReward[] = []
+  const big: CampaignReward[] = []
+  for (const row of result.rows) {
+    const reward: CampaignReward = {
+      id: row.id as string,
+      name: row.name as string,
+      description: (row.description as string) ?? '',
+      icon: (row.icon as string) ?? '🎁',
+      sharePercent: row.share_percent as number,
+    }
+    if (row.reward_tier === 'surprise') surprise.push(reward)
+    else if (row.reward_tier === 'big') big.push(reward)
+  }
+  return { surprise, big }
+}
+
+function rowToStampCardFromInsert(
+  cardId: string,
+  campaignId: string,
+  customerId: string,
+  initialStamps: number,
+  surpriseTriggerAt: number,
+  bigTriggerAt: number,
+): StampCardRow {
+  return {
+    id: cardId,
+    campaignId,
+    customerId,
+    stampsCollected: initialStamps,
+    surpriseTriggerAt,
+    bigTriggerAt,
+    surpriseAwarded: false,
+    bigAwarded: false,
+    status: 'active',
+    enrolledAt: new Date().toISOString(),
+    completedAt: null,
+    expiredAt: null,
+    lastStampDate: null,
+  }
+}
+
+function applyTriggerFlagsToCard(card: StampCardRow, tier: 'surprise' | 'big'): void {
+  if (tier === 'surprise') {
+    card.surpriseAwarded = true
+  } else {
+    card.bigAwarded = true
+  }
 }
 
 export function rollPoolReward(rewards: CampaignReward[]): CampaignReward | null {
@@ -250,16 +360,29 @@ async function evaluateTriggers(
   return results
 }
 
-async function expireStaleCards(campaignId: string, claimDeadline: string, today: string): Promise<void> {
-  if (today <= claimDeadline) return
+export async function expireStaleCards(campaignId: string, claimDeadline: string, today: string): Promise<void> {
+  await expireStaleStampCampaigns([{ campaignId, claimDeadline }], today)
+}
+
+/** Batch-expire stamp cards past claim deadline (one UPDATE per table). */
+export async function expireStaleStampCampaigns(
+  entries: { campaignId: string; claimDeadline: string }[],
+  today: string,
+): Promise<void> {
+  const expiredIds = entries
+    .filter(e => e.claimDeadline && today > e.claimDeadline)
+    .map(e => e.campaignId)
+  if (expiredIds.length === 0) return
+
+  const placeholders = expiredIds.map(() => '?').join(', ')
   await db.execute({
     sql: `UPDATE stamp_cards SET status = 'expired', expired_at = datetime('now')
-          WHERE campaign_id = ? AND status = 'active'`,
-    args: [campaignId],
+          WHERE campaign_id IN (${placeholders}) AND status = 'active'`,
+    args: expiredIds,
   })
   await db.execute({
-    sql: `UPDATE campaigns SET status = 'ended' WHERE id = ? AND status = 'active'`,
-    args: [campaignId],
+    sql: `UPDATE campaigns SET status = 'ended' WHERE id IN (${placeholders}) AND status = 'active'`,
+    args: expiredIds,
   })
 }
 
@@ -279,15 +402,14 @@ async function maybeMarkCapFilled(campaignId: string, userCap: number): Promise<
 }
 
 export async function getStampState(campaignId: string, customerId: string) {
-  const campaign = await getCampaignById(campaignId)
+  const campaign = await getCampaignLiteById(campaignId)
   if (campaign.mechanic !== 'stamp') throw new Error('NOT_STAMP_CAMPAIGN')
 
-  const raw = await db.execute({
-    sql: 'SELECT config_json, claim_period_days, cap_filled_at FROM campaigns WHERE id = ?',
-    args: [campaignId],
+  const meta = parseStampCampaignMeta({
+    config_json: campaign.configJson,
+    claim_period_days: campaign.claimPeriodDays,
+    cap_filled_at: campaign.capFilledAt,
   })
-  const row = raw.rows[0] as Record<string, unknown>
-  const meta = parseStampCampaignMeta(row)
   if (!meta) throw new Error('INVALID_STAMP_CONFIG')
 
   const today = todayInCampaignTz()
@@ -341,6 +463,20 @@ export async function getStampState(campaignId: string, customerId: string) {
   }
 }
 
+export async function executeStampCollectWithPin(
+  campaignId: string,
+  customerId: string,
+  pin: string,
+) {
+  const [campaignRow, cardInitial, tierRewards] = await Promise.all([
+    fetchCampaignRowById(campaignId),
+    fetchStampCard(campaignId, customerId),
+    fetchStampTierRewards(campaignId),
+  ])
+  verifyStampPinOnRow(campaignRow, pin)
+  return executeStampCollectInternal(campaignId, customerId, campaignRow, cardInitial, tierRewards)
+}
+
 export async function executeStampCollect(
   campaignId: string,
   customerId: string,
@@ -350,49 +486,64 @@ export async function executeStampCollect(
     throw new Error('INVALID_PLAY_SESSION')
   }
 
-  const campaign = await getCampaignById(campaignId)
-  if (campaign.mechanic !== 'stamp') throw new Error('NOT_STAMP_CAMPAIGN')
+  const [campaignRow, cardInitial, tierRewards] = await Promise.all([
+    fetchCampaignRowById(campaignId),
+    fetchStampCard(campaignId, customerId),
+    fetchStampTierRewards(campaignId),
+  ])
 
-  const raw = await db.execute({
-    sql: 'SELECT config_json, claim_period_days, cap_filled_at, status FROM campaigns WHERE id = ?',
-    args: [campaignId],
-  })
-  const row = raw.rows[0] as Record<string, unknown>
-  const meta = parseStampCampaignMeta(row)
+  return executeStampCollectInternal(campaignId, customerId, campaignRow, cardInitial, tierRewards)
+}
+
+async function executeStampCollectInternal(
+  campaignId: string,
+  customerId: string,
+  campaignRow: Record<string, unknown>,
+  cardInitial: StampCardRow | null,
+  tierRewards: { surprise: CampaignReward[]; big: CampaignReward[] },
+) {
+  const today = todayInCampaignTz()
+
+  if ((campaignRow.mechanic as string) !== 'stamp') throw new Error('NOT_STAMP_CAMPAIGN')
+
+  const meta = parseStampCampaignMeta(campaignRow)
   if (!meta) throw new Error('INVALID_STAMP_CONFIG')
 
-  const today = todayInCampaignTz()
-  const claimDeadline = getClaimDeadline(
-    campaign.endDate,
-    meta.claimPeriodDays,
-    meta.capFilledAt,
-  )
+  const status = campaignRow.status as string
+  const startDate = campaignRow.start_date as string
+  const endDate = campaignRow.end_date as string
+  const userCap = campaignRow.user_cap as number
+  const capFilledAt = (campaignRow.cap_filled_at as string) ?? null
 
   if (!isStampCampaignActive(
-    campaign.status,
-    campaign.startDate,
-    campaign.endDate,
+    status,
+    startDate,
+    endDate,
     meta.claimPeriodDays,
-    meta.capFilledAt,
+    capFilledAt,
     today,
   )) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
 
-  if (claimDeadline) {
-    await expireStaleCards(campaignId, claimDeadline, today)
+  const claimDeadline = getClaimDeadline(endDate, meta.claimPeriodDays, capFilledAt)
+  if (claimDeadline && today > claimDeadline) {
+    throw new Error('CLAIM_PERIOD_ENDED')
   }
 
-  let card = await fetchStampCard(campaignId, customerId)
+  const statements: SqlStatement[] = []
+  let card = cardInitial
   const isNew = !card
+  const allTriggerOutcomes: AppliedTrigger[] = []
 
   if (isNew) {
+    const currentUsers = await fetchParticipationCount(campaignId)
     if (!isEnrollmentOpen(
-      campaign.startDate,
-      campaign.endDate,
-      campaign.userCap,
-      campaign.currentUsers,
-      meta.capFilledAt,
+      startDate,
+      endDate,
+      userCap,
+      currentUsers,
+      capFilledAt,
       today,
     )) {
       throw new Error('USER_CAP_REACHED')
@@ -403,7 +554,7 @@ export async function executeStampCollect(
     const cardId = nanoid()
     const initialStamps = meta.config.prefillStamps
 
-    await db.batch([
+    statements.push(
       {
         sql: `INSERT INTO stamp_cards (
           id, campaign_id, customer_id, stamps_collected,
@@ -417,34 +568,30 @@ export async function executeStampCollect(
               VALUES (?, ?, ?, 0, NULL, 0, datetime('now'), datetime('now'))`,
         args: [nanoid(), campaignId, customerId],
       },
-    ])
-
-    card = (await fetchStampCard(campaignId, customerId))!
-    await maybeMarkCapFilled(campaignId, campaign.userCap)
-
-    // Evaluate prefill triggers
-    const surpriseRewards = await fetchTierRewards(campaignId, 'surprise')
-    const bigRewards = await fetchTierRewards(campaignId, 'big')
-    const prefillTriggers = await evaluateTriggers(
-      card, campaignId, customerId, meta.config, surpriseRewards, bigRewards,
     )
-    if (prefillTriggers.length > 0) {
-      await applyTriggerResults(card, campaignId, customerId, prefillTriggers)
-      card = (await fetchStampCard(campaignId, customerId))!
-    }
+
+    card = rowToStampCardFromInsert(
+      cardId, campaignId, customerId, initialStamps, surpriseTriggerAt, bigTriggerAt,
+    )
+    void maybeMarkCapFilled(campaignId, userCap)
+
+    const prefillTriggers = await evaluateTriggers(
+      card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
+    )
+    allTriggerOutcomes.push(
+      ...buildTriggerStatements(card, campaignId, customerId, prefillTriggers, statements),
+    )
   } else {
     if (!card) throw new Error('CARD_NOT_FOUND')
     if (card.status === 'expired') throw new Error('CARD_EXPIRED')
     if (card.status === 'completed') throw new Error('CARD_COMPLETE')
     if (card.lastStampDate === today) throw new Error('STAMP_ALREADY_COLLECTED_TODAY')
-    if (claimDeadline && today > claimDeadline) throw new Error('CLAIM_PERIOD_ENDED')
   }
 
   if (!card) throw new Error('CARD_NOT_FOUND')
 
-  // Add visit stamp (+1)
   const newStampCount = Math.min(card.stampsCollected + 1, meta.config.totalStamps)
-  const statements: { sql: string; args: (string | number | null)[] }[] = [
+  statements.push(
     {
       sql: `UPDATE stamp_cards SET stamps_collected = ?, last_stamp_date = ? WHERE id = ?`,
       args: [newStampCount, today, card.id],
@@ -460,29 +607,31 @@ export async function executeStampCollect(
             VALUES (?, ?, ?, 'stamp', 0, NULL, NULL, NULL)`,
       args: [nanoid(), campaignId, customerId],
     },
-  ]
-
-  await db.batch(statements)
-
-  card = (await fetchStampCard(campaignId, customerId))!
-  const surpriseRewards = await fetchTierRewards(campaignId, 'surprise')
-  const bigRewards = await fetchTierRewards(campaignId, 'big')
-  const triggers = await evaluateTriggers(
-    card, campaignId, customerId, meta.config, surpriseRewards, bigRewards,
   )
-  const triggerOutcomes = await applyTriggerResults(card, campaignId, customerId, triggers)
 
-  card = (await fetchStampCard(campaignId, customerId))!
+  card.stampsCollected = newStampCount
+  card.lastStampDate = today
+
+  const collectTriggers = await evaluateTriggers(
+    card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
+  )
+  allTriggerOutcomes.push(
+    ...buildTriggerStatements(card, campaignId, customerId, collectTriggers, statements),
+  )
 
   if (card.stampsCollected >= meta.config.totalStamps && card.status === 'active') {
-    await db.execute({
+    statements.push({
       sql: `UPDATE stamp_cards SET status = 'completed', completed_at = datetime('now') WHERE id = ?`,
       args: [card.id],
     })
     card.status = 'completed'
   }
 
-  const primaryTrigger = triggerOutcomes.find(t => t.won) ?? triggerOutcomes[0] ?? null
+  if (statements.length > 0) {
+    await db.batch(statements)
+  }
+
+  const primaryTrigger = allTriggerOutcomes.find(t => t.won) ?? allTriggerOutcomes[0] ?? null
 
   return {
     enrolled: isNew,
@@ -497,7 +646,7 @@ export async function executeStampCollect(
       ? { name: primaryTrigger.reward.name, icon: primaryTrigger.reward.icon }
       : null,
     code: primaryTrigger?.code ?? null,
-    triggers: triggerOutcomes,
+    triggers: allTriggerOutcomes,
   }
 }
 
@@ -508,30 +657,29 @@ interface AppliedTrigger {
   code: string | null
 }
 
-async function applyTriggerResults(
+function buildTriggerStatements(
   card: StampCardRow,
   campaignId: string,
   customerId: string,
   triggers: TriggerResult[],
-): Promise<AppliedTrigger[]> {
+  statements: SqlStatement[],
+): AppliedTrigger[] {
   const applied: AppliedTrigger[] = []
 
   for (const t of triggers) {
     if (!t.tier || !t.playId) continue
 
-    const statements: { sql: string; args: (string | number | null)[] }[] = [
-      {
-        sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
-              VALUES (?, ?, ?, 'stamp', ?, ?, ?, ?)`,
-        args: [
-          t.playId, campaignId, customerId,
-          t.won ? 1 : 0,
-          t.reward?.id ?? null,
-          t.reward?.name ?? (t.won ? 'Reward' : 'No win'),
-          t.code,
-        ],
-      },
-    ]
+    statements.push({
+      sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
+            VALUES (?, ?, ?, 'stamp', ?, ?, ?, ?)`,
+      args: [
+        t.playId, campaignId, customerId,
+        t.won ? 1 : 0,
+        t.reward?.id ?? null,
+        t.reward?.name ?? (t.won ? 'Reward' : 'No win'),
+        t.code,
+      ],
+    })
 
     if (t.tier === 'surprise') {
       statements.push({
@@ -554,7 +702,7 @@ async function applyTriggerResults(
       })
     }
 
-    await db.batch(statements)
+    applyTriggerFlagsToCard(card, t.tier)
     applied.push({
       tier: t.tier,
       won: t.won,
