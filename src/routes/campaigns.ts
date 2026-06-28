@@ -22,6 +22,7 @@ import {
 import {
   getStampState,
   executeStampCollect,
+  executeStampCollectWithPin,
 } from '../services/stamp-cards.js'
 import {
   getLoyaltyState,
@@ -339,14 +340,26 @@ router.get('/:id/stamp-state', requireCustomerAuth, async (req, res) => {
 
 router.post('/:id/stamp', requireCustomerAuth, async (req, res) => {
   try {
+    const pin = String(req.body?.pin ?? '').trim()
     const playSessionToken = String(req.body?.playSessionToken ?? '')
-    if (!playSessionToken) {
-      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    const campaignId = String(req.params.id)
+    const customerId = req.user!.id
+
+    let result
+    if (pin) {
+      result = await executeStampCollectWithPin(campaignId, customerId, pin)
+    } else if (playSessionToken) {
+      result = await executeStampCollect(campaignId, customerId, playSessionToken)
+    } else {
+      return res.status(422).json({ error: 'PIN or play session required' })
     }
-    const result = await executeStampCollect(String(req.params.id), req.user!.id, playSessionToken)
+
     res.json({ success: true, data: result })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'STAMP_FAILED'
+    if (message === 'INVALID_PIN') {
+      return res.status(401).json({ error: 'Wrong PIN. Ask staff for the current PIN.' })
+    }
     if (message === 'INVALID_PLAY_SESSION') {
       return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
     }
