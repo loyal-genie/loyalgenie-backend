@@ -596,6 +596,27 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   return base
 }
 
+/** Fast post-insert read — rewards only, no stats aggregation (create response). */
+async function campaignRowAfterCreate(campaignId: string): Promise<CampaignRow> {
+  const [result, rewards, currentUsers] = await Promise.all([
+    db.execute({ sql: 'SELECT * FROM campaigns WHERE id = ?', args: [campaignId] }),
+    fetchRewards(campaignId),
+    fetchCurrentUsers(campaignId),
+  ])
+  const row = result.rows[0]
+  if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+  const ensured = await ensureCampaignNotPastEnd(row as Record<string, unknown>)
+  const lite = mapRowToCampaignLite(ensured, currentUsers)
+  return {
+    ...lite,
+    createdAt: ensured.created_at as string,
+    rewards,
+    participations: 0,
+    rewardsClaimed: 0,
+    redeemedCount: 0,
+  }
+}
+
 async function createShakeCampaign(userId: string, payload: CreateShakeCampaignPayload) {
   if (payload.overallWinners > payload.userCap) {
     throw new Error('OVERALL_WINNERS_EXCEEDS_USER_CAP')
@@ -641,11 +662,7 @@ async function createShakeCampaign(userId: string, payload: CreateShakeCampaignP
 
   await db.batch(statements)
 
-  const result = await db.execute({
-    sql: 'SELECT * FROM campaigns WHERE id = ?',
-    args: [campaignId],
-  })
-  return await rowToCampaign(result.rows[0] as Record<string, unknown>)
+  return campaignRowAfterCreate(campaignId)
 }
 
 async function createStampCampaign(userId: string, payload: CreateStampCampaignPayload) {
@@ -706,11 +723,7 @@ async function createStampCampaign(userId: string, payload: CreateStampCampaignP
     ...rewardStatements,
   ])
 
-  const result = await db.execute({
-    sql: 'SELECT * FROM campaigns WHERE id = ?',
-    args: [campaignId],
-  })
-  return await rowToCampaign(result.rows[0] as Record<string, unknown>)
+  return campaignRowAfterCreate(campaignId)
 }
 
 async function createCheckInLoyaltyCampaignHandler(userId: string, payload: CreateCheckInLoyaltyCampaignPayload) {
@@ -747,11 +760,7 @@ async function createCheckInLoyaltyCampaignHandler(userId: string, payload: Crea
     ...rewardStatements,
   ])
 
-  const result = await db.execute({
-    sql: 'SELECT * FROM campaigns WHERE id = ?',
-    args: [campaignId],
-  })
-  return await rowToCampaign(result.rows[0] as Record<string, unknown>)
+  return campaignRowAfterCreate(campaignId)
 }
 
 export async function createCampaign(userId: string, payload: CreateCampaignPayload) {

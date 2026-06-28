@@ -3,7 +3,6 @@ import { db } from '../db/client.js'
 import { todayInCampaignTz } from '../utils/campaign-dates.js'
 import {
   verifyPlaySession,
-  getCampaignById,
   getCampaignLiteById,
   type CampaignReward,
 } from './campaigns.js'
@@ -114,15 +113,18 @@ export async function fetchAwardedRewardIds(loyaltyCardId: string): Promise<Set<
   return new Set(result.rows.map(r => r.reward_id as string))
 }
 
+type MilestoneReward = CampaignReward & { pointsThreshold: number }
+
 async function awardNewMilestones(
   card: LoyaltyCardRow,
   campaignId: string,
   customerId: string,
   loyaltyPoints: number,
+  milestones: MilestoneReward[],
+  awarded: Set<string>,
 ): Promise<{ reward: CampaignReward; code: string }[]> {
-  const milestones = await fetchMilestoneRewards(campaignId)
-  const awarded = await fetchAwardedRewardIds(card.id)
   const newlyUnlocked: { reward: CampaignReward; code: string }[] = []
+  const statements: { sql: string; args: unknown[] }[] = []
 
   for (const milestone of milestones) {
     if (loyaltyPoints < milestone.pointsThreshold) continue
@@ -131,7 +133,7 @@ async function awardNewMilestones(
     const playId = nanoid()
     const code = generateRedemptionCode(customerId)
 
-    await db.batch([
+    statements.push(
       {
         sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
               VALUES (?, ?, ?, 'check-in-loyalty', 1, ?, ?, ?)`,
@@ -148,9 +150,13 @@ async function awardNewMilestones(
               VALUES (?, ?, ?, ?, datetime('now'))`,
         args: [nanoid(), card.id, milestone.id, playId],
       },
-    ])
+    )
 
     newlyUnlocked.push({ reward: milestone, code })
+  }
+
+  if (statements.length > 0) {
+    await db.batch(statements)
   }
 
   return newlyUnlocked
@@ -330,30 +336,36 @@ export async function executeCheckIn(
     throw new Error('INVALID_PLAY_SESSION')
   }
 
-  const campaign = await getCampaignById(campaignId)
+  const today = todayInCampaignTz()
+
+  const [campaign, cardInitial, milestones] = await Promise.all([
+    getCampaignLiteById(campaignId),
+    fetchLoyaltyCard(campaignId, customerId),
+    fetchMilestoneRewards(campaignId),
+  ])
+
   if (campaign.mechanic !== 'check-in-loyalty') throw new Error('NOT_LOYALTY_CAMPAIGN')
 
   const config = parseCheckInConfig(campaign.configJson)
   if (!config) throw new Error('INVALID_LOYALTY_CONFIG')
 
-  const today = todayInCampaignTz()
   if (campaign.status !== 'active' || today < campaign.startDate || today > campaign.endDate) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
 
-  let card = await fetchLoyaltyCard(campaignId, customerId)
-  const isNew = !card
+  const isNew = !cardInitial
 
   if (isNew) {
     if (campaign.currentUsers >= campaign.userCap) {
       throw new Error('USER_CAP_REACHED')
     }
-  } else if (card!.lastCheckInDate === today) {
+  } else if (cardInitial!.lastCheckInDate === today) {
     throw new Error('ALREADY_CHECKED_IN_TODAY')
   }
 
   const pointsEarned = asInt(config.pointsPerCheckIn)
   const playId = nanoid()
+  let card: LoyaltyCardRow
 
   if (isNew) {
     const cardId = nanoid()
@@ -377,15 +389,25 @@ export async function executeCheckIn(
         args: [playId, campaignId, customerId],
       },
     ])
-    card = (await fetchLoyaltyCard(campaignId, customerId))!
+    card = {
+      id: cardId,
+      campaignId,
+      customerId,
+      loyaltyPoints: pointsEarned,
+      totalCheckIns: 1,
+      lastCheckInDate: today,
+      status: 'active',
+      enrolledAt: today,
+    }
   } else {
-    const newPoints = card!.loyaltyPoints + pointsEarned
+    const existing = cardInitial!
+    const newPoints = existing.loyaltyPoints + pointsEarned
     await db.batch([
       {
         sql: `UPDATE loyalty_cards
               SET loyalty_points = ?, total_check_ins = total_check_ins + 1, last_check_in_date = ?
               WHERE id = ?`,
-        args: [newPoints, today, card!.id],
+        args: [newPoints, today, existing.id],
       },
       {
         sql: `UPDATE campaign_participations
@@ -399,10 +421,26 @@ export async function executeCheckIn(
         args: [playId, campaignId, customerId],
       },
     ])
-    card = (await fetchLoyaltyCard(campaignId, customerId))!
+    card = {
+      ...existing,
+      loyaltyPoints: newPoints,
+      totalCheckIns: existing.totalCheckIns + 1,
+      lastCheckInDate: today,
+    }
   }
 
-  const milestonesUnlocked = await awardNewMilestones(card, campaignId, customerId, card.loyaltyPoints)
+  const awarded = isNew
+    ? new Set<string>()
+    : await fetchAwardedRewardIds(card.id)
+
+  const milestonesUnlocked = await awardNewMilestones(
+    card,
+    campaignId,
+    customerId,
+    card.loyaltyPoints,
+    milestones,
+    awarded,
+  )
 
   return {
     enrolled: isNew,

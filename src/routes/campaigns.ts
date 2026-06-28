@@ -146,11 +146,19 @@ router.post('/', requireAuth, async (req, res) => {
     if (message === 'REWARD_SHARES_MUST_SUM_100') {
       return res.status(422).json({ error: 'Reward shares must sum to exactly 100%' })
     }
+    if (message === 'OVERALL_WINNERS_EXCEEDS_USER_CAP') {
+      return res.status(422).json({ error: 'Overall winners cannot exceed user cap' })
+    }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL' || message === 'INVALID_LOYALTY_MILESTONES') {
       return res.status(422).json({ error: message === 'INVALID_LOYALTY_MILESTONES' ? 'Milestone point thresholds must be unique' : 'Invalid stamp card configuration' })
     }
-    console.error(err)
-    res.status(500).json({ error: 'Failed to create campaign' })
+    console.error('Create campaign failed:', err)
+    res.status(500).json({
+      error: 'Failed to create campaign',
+      details: process.env.NODE_ENV !== 'production' && err instanceof Error
+        ? { server: [err.message] }
+        : undefined,
+    })
   }
 })
 
