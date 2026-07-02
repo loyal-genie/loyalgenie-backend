@@ -195,8 +195,8 @@ async function fetchCustomerSummaries(businessId: string): Promise<VendorCustome
       LEFT JOIN (
         SELECT cr.customer_id, COUNT(*) AS redeemed_count
         FROM customer_rewards cr
-        INNER JOIN campaigns c2 ON c2.id = cr.campaign_id AND c2.business_id = ?
-        WHERE cr.status = 'redeemed'
+        LEFT JOIN campaigns c2 ON c2.id = cr.campaign_id
+        WHERE cr.status = 'redeemed' AND (cr.business_id = ? OR c2.business_id = ?)
         GROUP BY cr.customer_id
       ) cr_agg ON cr_agg.customer_id = cu.id
       LEFT JOIN (
@@ -209,7 +209,7 @@ async function fetchCustomerSummaries(businessId: string): Promise<VendorCustome
                cr_agg.redeemed_count, lc_agg.total_loyalty_points
       ORDER BY last_visit DESC
     `,
-    args: [businessId, businessId, businessId],
+    args: [businessId, businessId, businessId, businessId],
   })
 
   return result.rows.map(row => mapCustomerRow(row as Record<string, unknown>))
@@ -305,9 +305,10 @@ async function computeVendorDashboardStats(businessId: string): Promise<VendorDa
           SUM(CASE WHEN cr.status = 'pending' THEN 1 ELSE 0 END) AS pending_cnt,
           SUM(CASE WHEN cr.status = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_cnt
         FROM customer_rewards cr
-        INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
+        LEFT JOIN campaigns c ON c.id = cr.campaign_id
+        WHERE (cr.business_id = ? OR c.business_id = ?)
       `,
-      args: [businessId],
+      args: [businessId, businessId],
     }),
   ])
 
@@ -361,14 +362,15 @@ export async function getVendorCustomer(userId: string, customerId: string): Pro
 
   const rewardsResult = await db.execute({
     sql: `
-      SELECT cr.id, cr.campaign_id, c.name AS campaign_name, c.mechanic,
+      SELECT cr.id, cr.campaign_id, COALESCE(c.name, 'Rewards') AS campaign_name, COALESCE(c.mechanic, 'points_claim') AS mechanic,
              cr.reward_name, cr.icon, cr.earned_at, cr.status, cr.requested_at, cr.redeemed_at, cr.redemption_code
       FROM customer_rewards cr
-      INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
+      LEFT JOIN campaigns c ON c.id = cr.campaign_id
       WHERE cr.customer_id = ?
+        AND (cr.business_id = ? OR c.business_id = ?)
       ORDER BY cr.earned_at DESC
     `,
-    args: [businessId, customerId],
+    args: [customerId, businessId, businessId],
   })
 
   const rewards: VendorCustomerReward[] = rewardsResult.rows.map(row => ({
@@ -438,15 +440,16 @@ export async function listPendingRedemptions(userId: string): Promise<VendorRede
   const result = await db.execute({
     sql: `
       SELECT cr.id, cr.customer_id, cu.name AS customer_name, cu.phone,
-             cr.reward_name, c.name AS campaign_name, c.mechanic,
+             cr.reward_name, COALESCE(c.name, 'Rewards') AS campaign_name,
+             COALESCE(c.mechanic, 'points_claim') AS mechanic,
              cr.requested_at, cr.earned_at, cr.redemption_code
       FROM customer_rewards cr
-      INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
+      LEFT JOIN campaigns c ON c.id = cr.campaign_id
       INNER JOIN customer_users cu ON cu.id = cr.customer_id
-      WHERE cr.status = 'pending'
+      WHERE cr.status = 'pending' AND (cr.business_id = ? OR c.business_id = ?)
       ORDER BY COALESCE(cr.requested_at, cr.earned_at) ASC
     `,
-    args: [businessId],
+    args: [businessId, businessId],
   })
 
   return result.rows.map(row => ({
@@ -469,10 +472,10 @@ export async function markRedemptionRedeemed(userId: string, rewardId: string) {
     sql: `
       SELECT cr.id
       FROM customer_rewards cr
-      INNER JOIN campaigns c ON c.id = cr.campaign_id AND c.business_id = ?
-      WHERE cr.id = ? AND cr.status = 'pending'
+      LEFT JOIN campaigns c ON c.id = cr.campaign_id
+      WHERE cr.id = ? AND cr.status = 'pending' AND (cr.business_id = ? OR c.business_id = ?)
     `,
-    args: [businessId, rewardId],
+    args: [rewardId, businessId, businessId],
   })
   if (check.rows.length === 0) throw new Error('REWARD_NOT_FOUND')
 

@@ -19,10 +19,11 @@ npm run dev            # http://localhost:4000
 | Command | Description |
 |---------|-------------|
 | `npm run dev` | Start API with hot reload |
-| `npm start` | Start compiled API (production) |
-| `npm run build` | Compile TypeScript |
+| `npm start` | Build + apply DB migrations + start compiled API (production) |
+| `npm run build` | Compile TypeScript and copy SQL migrations into `backend/migrations/` |
 | `npm run verify:infra` | Verify Supabase Postgres + R2 credentials |
-| `npm run db:apply-schema` | Apply Postgres schema (run once per environment) |
+| `npm run db:migrate` | Apply all Postgres migrations manually (also runs on `npm start`) |
+| `npm run db:apply-schema` | Apply initial schema only (legacy — prefer `db:migrate`) |
 | `npm run db:import -- file.db [--fresh]` | Import Turso SQLite → Supabase + upload images to R2 |
 | `npm run db:enable-realtime` | Enable Supabase Realtime on `campaigns` + `customer_rewards` |
 | `npm run db:drop-blobs` | Drop `*_data` base64 columns (after images are in R2) |
@@ -55,10 +56,10 @@ Without these, vendor PIN and redemption queue fall back to polling (still works
 
 ## Database
 
-- Schema: `supabase/migrations/001_initial_schema.sql`
-- Realtime: `supabase/migrations/002_realtime.sql`
-- Drop blobs: `supabase/migrations/003_drop_blob_columns.sql`
-- Migrations are **not** run on server startup — use the npm scripts above
+- Migrations: `supabase/migrations/*.sql` (copied to `backend/migrations/` on build)
+- Migrations run **automatically on `npm start`** (idempotent — safe on every deploy)
+- Manual run: `npm run db:migrate` (same as startup)
+- Opt out: set `SKIP_DB_MIGRATIONS=true`
 - **Import Turso export (data + images):**
   ```bash
   npm run db:apply-schema

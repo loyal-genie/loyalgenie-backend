@@ -106,7 +106,7 @@ export const updateCampaignSchema = z.object({
   claimPeriodDays: z.number().int().min(1).max(365).optional(),
   stampConfig: stampConfigSchema.optional(),
   checkInConfig: checkInLoyaltyConfigSchema.optional(),
-  milestones: z.array(updateLoyaltyMilestoneSchema).min(1).optional(),
+  milestones: z.array(updateLoyaltyMilestoneSchema).optional(),
 })
 
 export interface UpdateCampaignPayload {
@@ -727,7 +727,9 @@ async function createStampCampaign(userId: string, payload: CreateStampCampaignP
 }
 
 async function createCheckInLoyaltyCampaignHandler(userId: string, payload: CreateCheckInLoyaltyCampaignPayload) {
-  validateMilestones(payload.milestones)
+  if (payload.milestones?.length) {
+    validateMilestones(payload.milestones)
+  }
 
   const businessId = await getBusinessIdForUser(userId)
   const campaignId = nanoid()
@@ -738,7 +740,7 @@ async function createCheckInLoyaltyCampaignHandler(userId: string, payload: Crea
     checkInConfig: payload.checkInConfig,
   })
 
-  const rewardStatements = payload.milestones.map((m, i) => ({
+  const rewardStatements = (payload.milestones ?? []).map((m, i) => ({
     sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
           VALUES (?, ?, ?, ?, ?, ?, ?, 'milestone')`,
     args: [nanoid(), campaignId, m.name, m.description ?? '', m.icon, m.pointsThreshold, i],
@@ -1951,9 +1953,9 @@ export async function executeShakePlay(
   if (won && reward && redemptionCode) {
     statements.push({
       sql: `INSERT INTO customer_rewards
-            (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'))`,
-      args: [nanoid(), customerId, campaignId, playId, reward.name, reward.icon, redemptionCode],
+            (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'campaign_win')`,
+      args: [nanoid(), customerId, campaignId, playId, reward.name, reward.icon, redemptionCode, campaign.businessId],
     })
   }
 
@@ -1980,9 +1982,11 @@ export async function executeShakePlay(
 
 export async function listCustomerRewards(customerId: string) {
   const result = await db.execute({
-    sql: `SELECT cr.*, c.name as campaign_name, c.mechanic
+    sql: `SELECT cr.*,
+                 COALESCE(c.name, 'Rewards') as campaign_name,
+                 COALESCE(c.mechanic, 'points_claim') as mechanic
           FROM customer_rewards cr
-          INNER JOIN campaigns c ON c.id = cr.campaign_id
+          LEFT JOIN campaigns c ON c.id = cr.campaign_id
           WHERE cr.customer_id = ?
           ORDER BY cr.earned_at DESC`,
     args: [customerId],

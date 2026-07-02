@@ -20,7 +20,7 @@ export const createCheckInLoyaltyCampaignSchema = z.object({
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   userCap: z.number().int().min(1),
   checkInConfig: checkInLoyaltyConfigSchema,
-  milestones: z.array(loyaltyMilestoneSchema).min(1),
+  milestones: z.array(loyaltyMilestoneSchema).optional(),
 })
 
 export type CreateCheckInLoyaltyCampaignPayload = z.infer<typeof createCheckInLoyaltyCampaignSchema>
