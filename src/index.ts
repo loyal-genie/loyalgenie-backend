@@ -2,7 +2,6 @@ import compression from 'compression'
 import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
-import { applyPendingMigrations } from './db/apply-migrations.js'
 import { verifyDatabaseConnection } from './db/client.js'
 import { getMsg91SetupStatus } from './services/msg91.js'
 import onboardingRoutes from './routes/onboarding.js'
@@ -153,7 +152,6 @@ app.use('/api/rewards', rewardsRoutes)
 
 async function start() {
   await verifyDatabaseConnection()
-  await applyPendingMigrations()
   startPinScheduler()
   app.listen(PORT, () => {
     console.log(`LoyalGenie API running on http://localhost:${PORT}`)
