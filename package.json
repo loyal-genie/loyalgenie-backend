@@ -8,7 +8,7 @@
     "prestart": "npm run build",
     "start": "node dist/index.js",
     "build": "tsc && npm run build:migrations",
-    "build:migrations": "mkdir -p migrations && (cp -r ../supabase/migrations/* migrations/ 2>/dev/null || cp -r supabase/migrations/* migrations/ 2>/dev/null || true)",
+    "build:migrations": "node scripts/copy-migrations.mjs",
     "db:migrate": "tsx scripts/apply-migrations.ts",
     "db:apply-schema": "tsx scripts/apply-schema.ts",
     "db:enable-realtime": "tsx scripts/apply-realtime.ts",

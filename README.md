@@ -56,7 +56,7 @@ Without these, vendor PIN and redemption queue fall back to polling (still works
 
 ## Database
 
-- Migrations: `supabase/migrations/*.sql` (copied to `backend/migrations/` on build)
+- Migrations: `backend/migrations/*.sql` (committed; copied to `dist/migrations/` on build)
 - Migrations run **automatically on `npm start`** (idempotent — safe on every deploy)
 - Manual run: `npm run db:migrate` (same as startup)
 - Opt out: set `SKIP_DB_MIGRATIONS=true`

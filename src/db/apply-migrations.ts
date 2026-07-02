@@ -14,6 +14,10 @@ const MIGRATION_FILES = [
 function resolveMigrationsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url))
   const candidates = [
+    // Bundled with compiled output (production / Render)
+    join(moduleDir, '../migrations'),
+    // Local dev / manual runs from backend root
+    join(process.cwd(), 'dist/migrations'),
     join(process.cwd(), 'migrations'),
     join(process.cwd(), 'supabase/migrations'),
     join(process.cwd(), '../supabase/migrations'),
@@ -28,7 +32,18 @@ function resolveMigrationsDir(): string {
   }
 
   throw new Error(
-    'Migrations directory not found. Expected backend/migrations or supabase/migrations.',
+    'Migrations directory not found. Run `npm run build` to copy SQL into dist/migrations.',
+  )
+}
+
+function isIdempotentMigrationError(message: string): boolean {
+  const lower = message.toLowerCase()
+  return (
+    lower.includes('already member of publication') ||
+    lower.includes('duplicate_object') ||
+    lower.includes('already exists') ||
+    lower.includes('duplicate key') ||
+    lower.includes('duplicate column')
   )
 }
 
@@ -39,8 +54,8 @@ async function applySqlFile(filePath: string, label: string): Promise<void> {
     console.log(`[db] Applied ${label}`)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (message.includes('already member of publication')) {
-      console.warn(`[db] Skipped ${label}: ${message}`)
+    if (isIdempotentMigrationError(message)) {
+      console.warn(`[db] Skipped ${label} (already applied): ${message}`)
       return
     }
     throw error
@@ -58,7 +73,11 @@ export async function applyPendingMigrations(): Promise<void> {
   console.log(`[db] Applying migrations from ${dir}`)
 
   for (const file of MIGRATION_FILES) {
-    await applySqlFile(join(dir, file), file)
+    const filePath = join(dir, file)
+    if (!existsSync(filePath)) {
+      throw new Error(`Missing migration file: ${filePath}`)
+    }
+    await applySqlFile(filePath, file)
   }
 
   console.log('[db] All migrations up to date')
