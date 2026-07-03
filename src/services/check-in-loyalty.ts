@@ -118,6 +118,7 @@ type MilestoneReward = CampaignReward & { pointsThreshold: number }
 async function awardNewMilestones(
   card: LoyaltyCardRow,
   campaignId: string,
+  businessId: string,
   customerId: string,
   loyaltyPoints: number,
   milestones: MilestoneReward[],
@@ -141,9 +142,9 @@ async function awardNewMilestones(
       },
       {
         sql: `INSERT INTO customer_rewards
-              (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'))`,
-        args: [nanoid(), customerId, campaignId, playId, milestone.name, milestone.icon, code],
+              (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'campaign_win')`,
+        args: [nanoid(), customerId, campaignId, playId, milestone.name, milestone.icon, code, businessId],
       },
       {
         sql: `INSERT INTO loyalty_milestone_awards (id, loyalty_card_id, reward_id, play_id, awarded_at)
@@ -327,6 +328,41 @@ export interface CheckInResult {
   milestonesUnlocked: { name: string; icon: string; code: string }[]
 }
 
+async function upsertBusinessPoints(
+  businessId: string,
+  customerId: string,
+  pointsEarned: number,
+): Promise<void> {
+  const existing = await db.execute({
+    sql: `SELECT id, points, total_earned
+          FROM business_customer_points
+          WHERE business_id = ? AND customer_id = ?`,
+    args: [businessId, customerId],
+  })
+
+  const row = existing.rows[0]
+  if (!row) {
+    await db.execute({
+      sql: `INSERT INTO business_customer_points
+            (id, business_id, customer_id, points, total_earned, updated_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+      args: [nanoid(), businessId, customerId, pointsEarned, pointsEarned],
+    })
+    return
+  }
+
+  await db.execute({
+    sql: `UPDATE business_customer_points
+          SET points = ?, total_earned = ?, updated_at = datetime('now')
+          WHERE id = ?`,
+    args: [
+      asInt(row.points) + pointsEarned,
+      asInt(row.total_earned) + pointsEarned,
+      row.id as string,
+    ],
+  })
+}
+
 export async function executeCheckIn(
   campaignId: string,
   customerId: string,
@@ -338,10 +374,9 @@ export async function executeCheckIn(
 
   const today = todayInCampaignTz()
 
-  const [campaign, cardInitial, milestones] = await Promise.all([
+  const [campaign, cardInitial] = await Promise.all([
     getCampaignLiteById(campaignId),
     fetchLoyaltyCard(campaignId, customerId),
-    fetchMilestoneRewards(campaignId),
   ])
 
   if (campaign.mechanic !== 'check-in-loyalty') throw new Error('NOT_LOYALTY_CAMPAIGN')
@@ -429,18 +464,7 @@ export async function executeCheckIn(
     }
   }
 
-  const awarded = isNew
-    ? new Set<string>()
-    : await fetchAwardedRewardIds(card.id)
-
-  const milestonesUnlocked = await awardNewMilestones(
-    card,
-    campaignId,
-    customerId,
-    card.loyaltyPoints,
-    milestones,
-    awarded,
-  )
+  await upsertBusinessPoints(campaign.businessId, customerId, pointsEarned)
 
   return {
     enrolled: isNew,
@@ -448,11 +472,7 @@ export async function executeCheckIn(
     loyaltyPoints: card.loyaltyPoints,
     totalCheckIns: card.totalCheckIns,
     checkedInToday: true,
-    milestonesUnlocked: milestonesUnlocked.map(m => ({
-      name: m.reward.name,
-      icon: m.reward.icon,
-      code: m.code,
-    })),
+    milestonesUnlocked: [],
   }
 }
 

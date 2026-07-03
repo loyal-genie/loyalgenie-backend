@@ -514,6 +514,7 @@ async function executeStampCollectInternal(
   const endDate = campaignRow.end_date as string
   const userCap = campaignRow.user_cap as number
   const capFilledAt = (campaignRow.cap_filled_at as string) ?? null
+  const businessId = campaignRow.business_id as string
 
   if (!isStampCampaignActive(
     status,
@@ -579,7 +580,7 @@ async function executeStampCollectInternal(
       card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
     )
     allTriggerOutcomes.push(
-      ...buildTriggerStatements(card, campaignId, customerId, prefillTriggers, statements),
+      ...buildTriggerStatements(card, campaignId, businessId, customerId, prefillTriggers, statements),
     )
   } else {
     if (!card) throw new Error('CARD_NOT_FOUND')
@@ -616,7 +617,7 @@ async function executeStampCollectInternal(
     card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
   )
   allTriggerOutcomes.push(
-    ...buildTriggerStatements(card, campaignId, customerId, collectTriggers, statements),
+    ...buildTriggerStatements(card, campaignId, businessId, customerId, collectTriggers, statements),
   )
 
   if (card.stampsCollected >= meta.config.totalStamps && card.status === 'active') {
@@ -660,6 +661,7 @@ interface AppliedTrigger {
 function buildTriggerStatements(
   card: StampCardRow,
   campaignId: string,
+  businessId: string,
   customerId: string,
   triggers: TriggerResult[],
   statements: SqlStatement[],
@@ -696,9 +698,9 @@ function buildTriggerStatements(
     if (t.won && t.reward && t.code) {
       statements.push({
         sql: `INSERT INTO customer_rewards
-              (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'))`,
-        args: [nanoid(), customerId, campaignId, t.playId, t.reward.name, t.reward.icon, t.code],
+              (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'campaign_win')`,
+        args: [nanoid(), customerId, campaignId, t.playId, t.reward.name, t.reward.icon, t.code, businessId],
       })
     }
 

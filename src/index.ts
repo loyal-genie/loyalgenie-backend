@@ -10,6 +10,7 @@ import businessRoutes from './routes/business.js'
 import campaignRoutes from './routes/campaigns.js'
 import customerRoutes from './routes/customer.js'
 import uploadRoutes from './routes/uploads.js'
+import rewardsRoutes from './routes/rewards.js'
 import { startPinScheduler } from './services/pin-scheduler.js'
 import { normalizeFrontendOrigin, parseFrontendOrigins } from './utils/frontend-url.js'
 
@@ -147,6 +148,7 @@ app.use('/api/business', businessRoutes)
 app.use('/api/campaigns', campaignRoutes)
 app.use('/api/customer', customerRoutes)
 app.use('/api/uploads', uploadRoutes)
+app.use('/api/rewards', rewardsRoutes)
 
 async function start() {
   await verifyDatabaseConnection()

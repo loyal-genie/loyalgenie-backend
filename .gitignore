@@ -19,3 +19,6 @@ dist/
 
 # Local date simulator (npm run sim:stamp:10d)
 .campaign-date-override
+
+# Migrations
+migrations/

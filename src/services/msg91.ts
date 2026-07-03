@@ -3,6 +3,13 @@ import { normalizeIndianPhone, formatPhoneLocal } from './phone.js'
 
 export { normalizeIndianPhone, formatPhoneLocal }
 
+const DEV_OTP = '123456'
+
+/** Fixed OTP for local/UAT when MSG91_DEV_OTP=true — works regardless of NODE_ENV. */
+export function isDevOtpMode(): boolean {
+  return process.env.MSG91_DEV_OTP?.trim().toLowerCase() === 'true'
+}
+
 /** Official MSG91 Send SMS (Flow / Template) API — for SMS templates with ##var1## */
 const MSG91_SMS_URLS = [
   'https://api.msg91.com/api/v5/flow',
@@ -34,7 +41,7 @@ function getEmailConfig() {
 }
 
 export function isMsg91Configured(): boolean {
-  if (process.env.MSG91_DEV_OTP === 'true') return false
+  if (isDevOtpMode()) return false
   const { authKey, templateId, senderId, apiMode } = getSmsConfig()
   if (!authKey || !templateId) return false
   if (authKey.includes('your_auth_key') || templateId.includes('your_template')) return false
@@ -43,7 +50,7 @@ export function isMsg91Configured(): boolean {
 }
 
 export function isMsg91EmailConfigured(): boolean {
-  if (process.env.MSG91_DEV_OTP === 'true') return false
+  if (isDevOtpMode()) return false
   const { authKey, templateId, domain, fromEmail } = getEmailConfig()
   if (!authKey || !templateId || !domain || !fromEmail) return false
   if (authKey.includes('your_auth_key')) return false
@@ -66,14 +73,22 @@ export function getMsg91SetupStatus() {
   if (!email.domain) emailMissing.push('MSG91_EMAIL_DOMAIN')
   if (!email.fromEmail) emailMissing.push('MSG91_EMAIL_FROM')
 
-  if (process.env.MSG91_DEV_OTP === 'true') {
-    smsMissing.push('MSG91_DEV_OTP (disable in production)')
-    emailMissing.push('MSG91_DEV_OTP (disable in production)')
+  if (isDevOtpMode()) {
+    return {
+      configured: false,
+      emailConfigured: false,
+      devOtpMode: true,
+      devOtp: DEV_OTP,
+      apiMode: sms.apiMode,
+      missing: [],
+      emailMissing: [],
+    }
   }
 
   return {
     configured: isMsg91Configured(),
     emailConfigured: isMsg91EmailConfigured(),
+    devOtpMode: false,
     apiMode: sms.apiMode,
     missing: smsMissing,
     emailMissing,
@@ -216,12 +231,18 @@ async function sendOtpViaWidget(mobile: string): Promise<void> {
 export async function sendOtp(phone: string): Promise<void> {
   const mobile = normalizeIndianPhone(phone)
 
+  if (isDevOtpMode()) {
+    await saveOtp(phone, DEV_OTP)
+    console.log(`[dev] SMS OTP for ${mobile}: ${DEV_OTP} (MSG91_DEV_OTP=true)`)
+    return
+  }
+
   if (!isMsg91Configured()) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('MSG91_NOT_CONFIGURED')
     }
-    await saveOtp(phone, '123456')
-    console.log(`[dev] SMS OTP for ${mobile}: 123456`)
+    await saveOtp(phone, DEV_OTP)
+    console.log(`[dev] SMS OTP for ${mobile}: ${DEV_OTP}`)
     return
   }
 
@@ -239,13 +260,19 @@ export async function sendOtp(phone: string): Promise<void> {
 export async function sendEmailOtp(email: string): Promise<void> {
   const normalized = email.trim().toLowerCase()
 
+  if (isDevOtpMode()) {
+    await saveEmailOtp(normalized, DEV_OTP)
+    console.log(`[dev] Email OTP for ${normalized}: ${DEV_OTP} (MSG91_DEV_OTP=true)`)
+    return
+  }
+
   if (!isMsg91EmailConfigured()) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('MSG91_EMAIL_NOT_CONFIGURED')
     }
-    await saveEmailOtp(normalized, '123456')
+    await saveEmailOtp(normalized, DEV_OTP)
     console.warn(
-      `[dev] Email OTP for ${normalized}: 123456 (MSG91 email not configured — set MSG91_EMAIL_DOMAIN and MSG91_EMAIL_FROM in .env)`,
+      `[dev] Email OTP for ${normalized}: ${DEV_OTP} (MSG91 email not configured — set MSG91_EMAIL_DOMAIN and MSG91_EMAIL_FROM in .env)`,
     )
     return
   }
@@ -256,11 +283,16 @@ export async function sendEmailOtp(email: string): Promise<void> {
 }
 
 export async function verifyOtp(phone: string, otp: string): Promise<void> {
+  if (isDevOtpMode()) {
+    if (otp !== DEV_OTP) throw new Error('INVALID_OTP')
+    return
+  }
+
   if (!isMsg91Configured()) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('MSG91_NOT_CONFIGURED')
     }
-    if (otp !== '123456') throw new Error('INVALID_OTP')
+    if (otp !== DEV_OTP) throw new Error('INVALID_OTP')
     return
   }
 
@@ -291,11 +323,16 @@ export async function verifyOtp(phone: string, otp: string): Promise<void> {
 }
 
 export async function verifyEmailOtp(email: string, otp: string): Promise<void> {
+  if (isDevOtpMode()) {
+    if (otp !== DEV_OTP) throw new Error('INVALID_OTP')
+    return
+  }
+
   if (!isMsg91EmailConfigured()) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('MSG91_EMAIL_NOT_CONFIGURED')
     }
-    if (otp !== '123456') throw new Error('INVALID_OTP')
+    if (otp !== DEV_OTP) throw new Error('INVALID_OTP')
     return
   }
 
