@@ -63,12 +63,40 @@ export function nextMidnightIsoInCampaignTz(from = new Date()): string {
   return new Date(`${tomorrow}T00:00:00+05:30`).toISOString()
 }
 
+export function currentTimeInCampaignTz(date = nowInCampaignTz()): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: CAMPAIGN_TIMEZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date)
+  const hour = parts.find(p => p.type === 'hour')?.value ?? '00'
+  const minute = parts.find(p => p.type === 'minute')?.value ?? '00'
+  return `${hour}:${minute}`
+}
+
 export function isCampaignInDateWindow(
   startDate: string,
   endDate: string,
   today = todayInCampaignTz(),
 ): boolean {
   return today >= startDate && today <= endDate
+}
+
+/** Date + optional IST time window (HH:MM). Defaults: 00:00 start, 23:59 end. */
+export function isCampaignInWindow(
+  startDate: string,
+  endDate: string,
+  startTime = '00:00',
+  endTime = '23:59',
+  now = nowInCampaignTz(),
+): boolean {
+  const today = todayInCampaignTz(now)
+  if (today < startDate || today > endDate) return false
+  const time = currentTimeInCampaignTz(now)
+  if (today === startDate && time < startTime) return false
+  if (today === endDate && time > endTime) return false
+  return true
 }
 
 export function isCampaignPastEnd(endDate: string, today = todayInCampaignTz()): boolean {

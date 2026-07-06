@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
+import { computeRedeemExpiryDate, validateRedeemExpiryConfig } from '../utils/redeem-expiry.js'
 import { db } from '../db/client.js'
 import { getBusinessForUser } from './auth.js'
 import { nowInCampaignTz, todayInCampaignTz } from '../utils/campaign-dates.js'
@@ -37,13 +38,15 @@ type UpdateBusinessRewardPayload = z.infer<typeof updateBusinessRewardSchema>
 
 function assertRedeemExpiry(payload: CreateBusinessRewardPayload | UpdateBusinessRewardPayload): void {
   if (!payload.redeemExpiryMode) return
-  if (payload.redeemExpiryMode === 'fixed' && !payload.redeemFixedDate) {
-    throw new Error('REDEEM_FIXED_DATE_REQUIRED')
-  }
-  if (payload.redeemExpiryMode === 'relative') {
-    if (!payload.redeemRelativeAmount || !payload.redeemRelativeUnit) {
-      throw new Error('REDEEM_RELATIVE_REQUIRED')
-    }
+  try {
+    validateRedeemExpiryConfig(
+      payload.redeemExpiryMode,
+      payload.redeemFixedDate,
+      payload.redeemRelativeAmount,
+      payload.redeemRelativeUnit,
+    )
+  } catch {
+    throw new Error('REDEEM_BEFORE_REQUIRED')
   }
 }
 
@@ -328,21 +331,6 @@ export async function getRewardsOverview(userId: string) {
     totalRedeemed: Number(redeemed.rows[0]?.c ?? 0),
     expiredRewards,
   }
-}
-
-function computeRedeemExpiryDate(
-  mode: 'fixed' | 'relative',
-  fixedDate: string | null,
-  relativeAmount: number | null,
-  relativeUnit: 'day' | 'week' | 'month' | null,
-): string | null {
-  if (mode === 'fixed') return fixedDate
-  if (!relativeAmount || !relativeUnit) return null
-  const now = nowInCampaignTz()
-  if (relativeUnit === 'day') now.setDate(now.getDate() + relativeAmount)
-  if (relativeUnit === 'week') now.setDate(now.getDate() + (relativeAmount * 7))
-  if (relativeUnit === 'month') now.setMonth(now.getMonth() + relativeAmount)
-  return now.toISOString().slice(0, 10)
 }
 
 export async function listCustomerBusinessRewards(customerId: string, businessId: string) {

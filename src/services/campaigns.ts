@@ -8,7 +8,14 @@ import {
   todayInCampaignTz,
   istDateSql,
   nowInCampaignTz,
+  isCampaignInWindow,
+  currentTimeInCampaignTz,
 } from '../utils/campaign-dates.js'
+import {
+  computeRedeemExpiryDate,
+  validateRedeemExpiryConfig,
+  isCustomerRewardExpired,
+} from '../utils/redeem-expiry.js'
 import {
   validateStampConfig,
   isStampCampaignActive,
@@ -42,18 +49,43 @@ export const PIN_CYCLE_SECONDS = 120
 export const PIN_VERIFY_GRACE_SECONDS = PIN_CYCLE_SECONDS
 const PLAY_SESSION_EXPIRES = '5m'
 
-const rewardSchema = z.object({
+const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+
+const shakeRewardCore = z.object({
   name: z.string().min(1),
   description: z.string().optional().default(''),
   icon: z.string().min(1).default('🎁'),
   sharePercent: z.number().int().min(1).max(100),
+  redeemExpiryMode: z.enum(['fixed', 'relative']),
+  redeemFixedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  redeemRelativeAmount: z.number().int().min(1).optional(),
+  redeemRelativeUnit: z.enum(['day', 'week', 'month']).optional(),
 })
+
+function refineShakeReward<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
+  return schema.superRefine((val, ctx) => {
+    try {
+      validateRedeemExpiryConfig(
+        val.redeemExpiryMode as 'fixed' | 'relative',
+        val.redeemFixedDate as string | undefined,
+        val.redeemRelativeAmount as number | undefined,
+        val.redeemRelativeUnit as string | undefined,
+      )
+    } catch {
+      ctx.addIssue({ code: 'custom', message: 'Redeem before is required for each reward' })
+    }
+  })
+}
+
+const rewardSchema = refineShakeReward(shakeRewardCore)
 
 export const createShakeCampaignSchema = z.object({
   name: z.string().min(1),
   mechanic: z.literal('shake').default('shake'),
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  startTime: timeSchema.default('00:00'),
+  endTime: timeSchema.default('23:59'),
   userCap: z.number().int().min(1),
   perDayUserLimit: z.number().int().min(1),
   playsPerDay: z.number().int().min(1).max(10),
@@ -70,9 +102,9 @@ export const createCampaignSchema = z.discriminatedUnion('mechanic', [
 export type CreateCampaignPayload = z.infer<typeof createCampaignSchema>
 export type CreateShakeCampaignPayload = z.infer<typeof createShakeCampaignSchema>
 
-const updateRewardSchema = rewardSchema.extend({
+const updateRewardSchema = refineShakeReward(shakeRewardCore.extend({
   id: z.string().optional(),
-})
+}))
 
 const stampRewardEntrySchema = z.object({
   id: z.string().optional(),
@@ -89,6 +121,7 @@ const updateLoyaltyMilestoneSchema = loyaltyMilestoneSchema.extend({
 export const updateCampaignSchema = z.object({
   name: z.string().min(1).optional(),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  endTime: timeSchema.optional(),
   userCap: z.number().int().min(1).optional(),
   playsPerDay: z.number().int().min(1).max(10).optional(),
   perDayUserLimit: z.number().int().min(1).optional(),
@@ -112,6 +145,7 @@ export const updateCampaignSchema = z.object({
 export interface UpdateCampaignPayload {
   name?: string
   endDate?: string
+  endTime?: string
   userCap?: number
   playsPerDay?: number
   perDayUserLimit?: number
@@ -120,7 +154,17 @@ export interface UpdateCampaignPayload {
   winRatePercent?: number
   status?: 'active' | 'paused' | 'ended'
   rewards?:
-    | { id?: string; name: string; description?: string; icon: string; sharePercent: number }[]
+    | {
+        id?: string
+        name: string
+        description?: string
+        icon: string
+        sharePercent: number
+        redeemExpiryMode: 'fixed' | 'relative'
+        redeemFixedDate?: string
+        redeemRelativeAmount?: number
+        redeemRelativeUnit?: 'day' | 'week' | 'month'
+      }[]
     | StampTierRewards
   claimPeriodDays?: number
   stampConfig?: z.infer<typeof stampConfigSchema>
@@ -135,7 +179,17 @@ type StampTierRewards = {
 
 function isShakeRewardsUpdate(
   rewards: UpdateCampaignPayload['rewards'],
-): rewards is { id?: string; name: string; description?: string; icon: string; sharePercent: number }[] {
+): rewards is {
+  id?: string
+  name: string
+  description?: string
+  icon: string
+  sharePercent: number
+  redeemExpiryMode: 'fixed' | 'relative'
+  redeemFixedDate?: string
+  redeemRelativeAmount?: number
+  redeemRelativeUnit?: 'day' | 'week' | 'month'
+}[] {
   return Array.isArray(rewards)
 }
 
@@ -152,6 +206,10 @@ export interface CampaignReward {
   icon: string
   sharePercent: number
   rewardTier?: string | null
+  redeemExpiryMode?: 'fixed' | 'relative'
+  redeemFixedDate?: string | null
+  redeemRelativeAmount?: number | null
+  redeemRelativeUnit?: 'day' | 'week' | 'month' | null
 }
 
 export interface CampaignRow {
@@ -162,6 +220,8 @@ export interface CampaignRow {
   status: string
   startDate: string
   endDate: string
+  startTime: string
+  endTime: string
   userCap: number
   perDayUserLimit: number
   playsPerDay: number
@@ -193,6 +253,8 @@ export type CampaignLite = Pick<
   | 'status'
   | 'startDate'
   | 'endDate'
+  | 'startTime'
+  | 'endTime'
   | 'userCap'
   | 'perDayUserLimit'
   | 'playsPerDay'
@@ -319,8 +381,10 @@ async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
 async function ensureCampaignNotPastEnd(row: Record<string, unknown>): Promise<Record<string, unknown>> {
   const status = row.status as string
   const endDate = row.end_date as string
+  const endTime = (row.end_time as string) ?? '23:59'
   const mechanic = row.mechanic as string
   const today = todayInCampaignTz()
+  const now = nowInCampaignTz()
 
   if (status !== 'active' && status !== 'paused') {
     return row
@@ -340,7 +404,9 @@ async function ensureCampaignNotPastEnd(row: Record<string, unknown>): Promise<R
     return row
   }
 
-  if (today > endDate) {
+  const pastEndDate = today > endDate
+  const pastEndTime = today === endDate && currentTimeInCampaignTz(now) > endTime
+  if (pastEndDate || pastEndTime) {
     await db.execute({
       sql: `UPDATE campaigns SET status = 'ended' WHERE id = ?`,
       args: [row.id as string],
@@ -445,7 +511,8 @@ async function fetchRewardsBatch(campaignIds: string[]): Promise<Map<string, Cam
 
   const placeholders = campaignIds.map(() => '?').join(', ')
   const result = await db.execute({
-    sql: `SELECT id, campaign_id, name, description, icon, share_percent, reward_tier
+    sql: `SELECT id, campaign_id, name, description, icon, share_percent, reward_tier,
+                 redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit
           FROM campaign_rewards
           WHERE campaign_id IN (${placeholders})
           ORDER BY campaign_id ASC, sort_order ASC`,
@@ -461,6 +528,10 @@ async function fetchRewardsBatch(campaignIds: string[]): Promise<Map<string, Cam
       icon: (row.icon as string) ?? '🎁',
       sharePercent: row.share_percent as number,
       rewardTier: (row.reward_tier as string) ?? null,
+      redeemExpiryMode: (row.redeem_expiry_mode as 'fixed' | 'relative') ?? 'relative',
+      redeemFixedDate: (row.redeem_fixed_date as string) ?? null,
+      redeemRelativeAmount: row.redeem_relative_amount != null ? Number(row.redeem_relative_amount) : null,
+      redeemRelativeUnit: (row.redeem_relative_unit as 'day' | 'week' | 'month' | null) ?? null,
     })
   }
 
@@ -495,6 +566,8 @@ export function mapRowToCampaignLite(
     status: row.status as string,
     startDate: row.start_date as string,
     endDate: row.end_date as string,
+    startTime: (row.start_time as string) ?? '00:00',
+    endTime: (row.end_time as string) ?? '23:59',
     userCap,
     perDayUserLimit: row.per_day_user_limit as number,
     playsPerDay: row.plays_per_day as number,
@@ -539,6 +612,8 @@ function mapRowToCampaignListRow(
     status: row.status as string,
     startDate: row.start_date as string,
     endDate: row.end_date as string,
+    startTime: (row.start_time as string) ?? '00:00',
+    endTime: (row.end_time as string) ?? '23:59',
     userCap,
     perDayUserLimit: row.per_day_user_limit as number,
     playsPerDay: row.plays_per_day as number,
@@ -573,6 +648,8 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
     status: row.status as string,
     startDate: row.start_date as string,
     endDate: row.end_date as string,
+    startTime: (row.start_time as string) ?? '00:00',
+    endTime: (row.end_time as string) ?? '23:59',
     userCap,
     perDayUserLimit: row.per_day_user_limit as number,
     playsPerDay: row.plays_per_day as number,
@@ -640,23 +717,28 @@ async function createShakeCampaign(userId: string, payload: CreateShakeCampaignP
   const statements = [
     {
       sql: `INSERT INTO campaigns (
-        id, business_id, name, mechanic, status, start_date, end_date,
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
         user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
         overall_winners,
         pin, pin_expires_at, claim_period_days
-      ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
+      ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
       args: [
         campaignId, businessId, payload.name, payload.mechanic,
-        payload.startDate, payload.endDate,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
         payload.userCap, perDayUserLimit, payload.playsPerDay,
         winRatePercent, payload.overallWinners,
         pin, pinExpires,
       ],
     },
     ...payload.rewards.map((r, i) => ({
-      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-      args: [nanoid(), campaignId, r.name, r.description ?? '', r.icon, r.sharePercent, i],
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      args: [
+        nanoid(), campaignId, r.name, r.description ?? '', r.icon, r.sharePercent, i,
+        r.redeemExpiryMode, r.redeemFixedDate ?? null,
+        r.redeemRelativeAmount ?? null, r.redeemRelativeUnit ?? null,
+      ],
     })),
   ]
 
@@ -710,13 +792,14 @@ async function createStampCampaign(userId: string, payload: CreateStampCampaignP
   await db.batch([
     {
       sql: `INSERT INTO campaigns (
-        id, business_id, name, mechanic, status, start_date, end_date,
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
         user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
         config_json, pin, pin_expires_at, claim_period_days
-      ) VALUES (?, ?, ?, 'stamp', 'active', ?, ?, ?, 0, 1, 0, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, 'stamp', 'active', ?, ?, ?, ?, ?, 0, 1, 0, ?, ?, ?, ?)`,
       args: [
         campaignId, businessId, payload.name,
-        payload.startDate, payload.endDate, payload.userCap,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap,
         configJson, pin, pinExpires, payload.claimPeriodDays,
       ],
     },
@@ -749,13 +832,14 @@ async function createCheckInLoyaltyCampaignHandler(userId: string, payload: Crea
   await db.batch([
     {
       sql: `INSERT INTO campaigns (
-        id, business_id, name, mechanic, status, start_date, end_date,
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
         user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
         config_json, pin, pin_expires_at, claim_period_days
-      ) VALUES (?, ?, ?, 'check-in-loyalty', 'active', ?, ?, ?, 0, 1, 0, ?, ?, ?, 30)`,
+      ) VALUES (?, ?, ?, 'check-in-loyalty', 'active', ?, ?, ?, ?, ?, 0, 1, 0, ?, ?, ?, 30)`,
       args: [
         campaignId, businessId, payload.name,
-        payload.startDate, payload.endDate, payload.userCap,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap,
         configJson, pin, pinExpires,
       ],
     },
@@ -920,6 +1004,10 @@ async function updateShakeCampaign(
     fields.push('end_date = ?')
     args.push(payload.endDate)
   }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
   if (payload.userCap !== undefined) {
     fields.push('user_cap = ?')
     args.push(payload.userCap)
@@ -978,7 +1066,17 @@ async function updateShakeCampaign(
 async function replaceShakeRewards(
   campaignId: string,
   existingRewards: CampaignReward[],
-  rewards: { id?: string; name: string; description?: string; icon: string; sharePercent: number }[],
+  rewards: {
+    id?: string
+    name: string
+    description?: string
+    icon: string
+    sharePercent: number
+    redeemExpiryMode: 'fixed' | 'relative'
+    redeemFixedDate?: string
+    redeemRelativeAmount?: number
+    redeemRelativeUnit?: 'day' | 'week' | 'month'
+  }[],
 ) {
   const existingIds = new Set(existingRewards.map(r => r.id))
   const statements = [
@@ -987,8 +1085,9 @@ async function replaceShakeRewards(
       args: [campaignId],
     },
     ...rewards.map((r, i) => ({
-      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         r.id && existingIds.has(r.id) ? r.id : nanoid(),
         campaignId,
@@ -997,6 +1096,10 @@ async function replaceShakeRewards(
         r.icon,
         r.sharePercent,
         i,
+        r.redeemExpiryMode,
+        r.redeemFixedDate ?? null,
+        r.redeemRelativeAmount ?? null,
+        r.redeemRelativeUnit ?? null,
       ],
     })),
   ]
@@ -1042,6 +1145,10 @@ async function updateStampCampaign(
   if (payload.endDate !== undefined) {
     fields.push('end_date = ?')
     args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
   }
   if (payload.userCap !== undefined) {
     fields.push('user_cap = ?')
@@ -1135,6 +1242,10 @@ async function updateLoyaltyCampaign(
   if (payload.endDate !== undefined) {
     fields.push('end_date = ?')
     args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
   }
   if (payload.userCap !== undefined) {
     fields.push('user_cap = ?')
@@ -1524,7 +1635,9 @@ export async function getPublicCampaign(campaignId: string) {
 
   if (campaign.mechanic === 'check-in-loyalty') {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
-    if (today < campaign.startDate || today > campaign.endDate) {
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -1553,7 +1666,9 @@ export async function getPublicCampaign(campaignId: string) {
   }
 
   if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
-  if (today < campaign.startDate || today > campaign.endDate) {
+  const startTime = (row.start_time as string) ?? '00:00'
+  const endTime = (row.end_time as string) ?? '23:59'
+  if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
   return {
@@ -1637,7 +1752,9 @@ export async function verifyCampaignPin(campaignId: string, pin: string, custome
     }
   } else {
     if (status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
-    if (today < startDate || today > endDate) {
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    if (!isCampaignInWindow(startDate, endDate, startTime, endTime, now)) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
   }
@@ -1730,7 +1847,9 @@ export async function checkEligibility(
   }
 
   const today = todayInCampaignTz()
-  if (today < campaign.startDate || today > campaign.endDate) {
+  const startTime = campaign.startTime ?? '00:00'
+  const endTime = campaign.endTime ?? '23:59'
+  if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
     return {
       ...base,
       canPlay: false,
@@ -1951,11 +2070,17 @@ export async function executeShakePlay(
   })
 
   if (won && reward && redemptionCode) {
+    const redeemExpiresAt = computeRedeemExpiryDate(
+      reward.redeemExpiryMode ?? 'relative',
+      reward.redeemFixedDate ?? null,
+      reward.redeemRelativeAmount ?? 7,
+      reward.redeemRelativeUnit ?? 'day',
+    )
     statements.push({
       sql: `INSERT INTO customer_rewards
-            (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'campaign_win')`,
-      args: [nanoid(), customerId, campaignId, playId, reward.name, reward.icon, redemptionCode, campaign.businessId],
+            (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type, redeem_expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'campaign_win', ?)`,
+      args: [nanoid(), customerId, campaignId, playId, reward.name, reward.icon, redemptionCode, campaign.businessId, redeemExpiresAt],
     })
   }
 
@@ -1991,30 +2116,59 @@ export async function listCustomerRewards(customerId: string) {
           ORDER BY cr.earned_at DESC`,
     args: [customerId],
   })
-  return result.rows.map(row => ({
-    id: row.id as string,
-    campaignId: row.campaign_id as string,
-    campaignName: row.campaign_name as string,
-    mechanic: row.mechanic as string,
-    reward: row.reward_name as string,
-    icon: (row.icon as string) ?? '🎁',
-    earnedAt: row.earned_at as string,
-    status: row.status as string,
-    requestedAt: (row.requested_at as string) ?? undefined,
-    redeemedAt: (row.redeemed_at as string) ?? undefined,
-    code: row.redemption_code as string,
-  }))
+
+  const expiredIds: string[] = []
+  const rows = result.rows.map(row => {
+    const redeemExpiresAt = (row.redeem_expires_at as string) ?? null
+    let status = row.status as string
+    if (status === 'earned' && isCustomerRewardExpired(redeemExpiresAt)) {
+      status = 'expired'
+      expiredIds.push(row.id as string)
+    }
+    return {
+      id: row.id as string,
+      campaignId: row.campaign_id as string,
+      campaignName: row.campaign_name as string,
+      mechanic: row.mechanic as string,
+      reward: row.reward_name as string,
+      icon: (row.icon as string) ?? '🎁',
+      earnedAt: row.earned_at as string,
+      status,
+      requestedAt: (row.requested_at as string) ?? undefined,
+      redeemedAt: (row.redeemed_at as string) ?? undefined,
+      code: row.redemption_code as string,
+      redeemBefore: redeemExpiresAt,
+    }
+  })
+
+  if (expiredIds.length > 0) {
+    const placeholders = expiredIds.map(() => '?').join(', ')
+    await db.execute({
+      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id IN (${placeholders}) AND status = 'earned'`,
+      args: expiredIds,
+    })
+  }
+
+  return rows
 }
 
 export async function requestCustomerRedemption(customerId: string, rewardId: string) {
   const check = await db.execute({
-    sql: `SELECT id, status FROM customer_rewards WHERE id = ? AND customer_id = ?`,
+    sql: `SELECT id, status, redeem_expires_at FROM customer_rewards WHERE id = ? AND customer_id = ?`,
     args: [rewardId, customerId],
   })
   if (check.rows.length === 0) throw new Error('REWARD_NOT_FOUND')
-  const status = check.rows[0]!.status as string
+  const row = check.rows[0]!
+  const status = row.status as string
   if (status === 'pending') throw new Error('ALREADY_REQUESTED')
   if (status === 'redeemed') throw new Error('ALREADY_REDEEMED')
+  if (status === 'expired' || isCustomerRewardExpired((row.redeem_expires_at as string) ?? null)) {
+    await db.execute({
+      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id = ? AND status = 'earned'`,
+      args: [rewardId],
+    })
+    throw new Error('REWARD_EXPIRED')
+  }
   if (status !== 'earned') throw new Error('INVALID_STATUS')
 
   await db.execute({

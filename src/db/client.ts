@@ -47,7 +47,10 @@ export function convertSql(sql: string): string {
     /datetime\('now',\s*'\+(\d+) days'\)/gi,
     "NOW() + INTERVAL '$1 days'",
   )
-  converted = converted.replace(/datetime\('now'\)/gi, 'NOW()')
+  converted = converted.replace(
+    /datetime\('now'\)/gi,
+    "to_char(NOW() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD\"T\"HH24:MI:SS')",
+  )
 
   converted = converted.replace(
     /date\(\s*([^,]+),\s*'\+5 hours',\s*'\+30 minutes'\s*\)/gi,

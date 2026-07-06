@@ -3,6 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import { verifyDatabaseConnection } from './db/client.js'
+import { ensureColumnPatches } from './db/migrate.js'
 import { getMsg91SetupStatus } from './services/msg91.js'
 import onboardingRoutes from './routes/onboarding.js'
 import authRoutes from './routes/auth.js'
@@ -152,6 +153,7 @@ app.use('/api/rewards', rewardsRoutes)
 
 async function start() {
   await verifyDatabaseConnection()
+  await ensureColumnPatches()
   startPinScheduler()
   app.listen(PORT, () => {
     console.log(`LoyalGenie API running on http://localhost:${PORT}`)
