@@ -26,7 +26,7 @@ import {
   getStampCampaignStats,
   type StampCampaignStats,
 } from './stamp-cards.js'
-import { createStampCampaignSchema, stampConfigSchema, type CreateStampCampaignPayload } from './stamp-campaign-schema.js'
+import { createStampCampaignSchema, stampConfigSchema, stampRewardTierKey, type CreateStampCampaignPayload } from './stamp-campaign-schema.js'
 import {
   createCheckInLoyaltyCampaignSchema,
   validateMilestones,
@@ -173,8 +173,28 @@ export interface UpdateCampaignPayload {
 }
 
 type StampTierRewards = {
-  surprise: { id?: string; name: string; description?: string; icon: string; winPercent: number }[]
-  big: { id?: string; name: string; description?: string; icon: string; winPercent: number }[]
+  surprise: Record<string, {
+    id?: string
+    name: string
+    description?: string
+    icon: string
+    winPercent: number
+    redeemExpiryMode: 'fixed' | 'relative'
+    redeemFixedDate?: string
+    redeemRelativeAmount?: number
+    redeemRelativeUnit?: 'day' | 'week' | 'month'
+  }[]>
+  big: Record<string, {
+    id?: string
+    name: string
+    description?: string
+    icon: string
+    winPercent: number
+    redeemExpiryMode: 'fixed' | 'relative'
+    redeemFixedDate?: string
+    redeemRelativeAmount?: number
+    redeemRelativeUnit?: 'day' | 'week' | 'month'
+  }[]>
 }
 
 function isShakeRewardsUpdate(
@@ -196,7 +216,10 @@ function isShakeRewardsUpdate(
 function isStampRewardsUpdate(
   rewards: UpdateCampaignPayload['rewards'],
 ): rewards is StampTierRewards {
-  return rewards !== undefined && !Array.isArray(rewards)
+  return rewards !== undefined
+    && !Array.isArray(rewards)
+    && typeof (rewards as StampTierRewards).surprise === 'object'
+    && !Array.isArray((rewards as StampTierRewards).surprise)
 }
 
 export interface CampaignReward {
@@ -750,13 +773,17 @@ async function createShakeCampaign(userId: string, payload: CreateShakeCampaignP
 async function createStampCampaign(userId: string, payload: CreateStampCampaignPayload) {
   validateStampConfig(payload.stampConfig)
 
-  for (const tier of ['surprise', 'big'] as const) {
-    const mode = payload.stampConfig[`${tier}Mode`]
-    const entries = payload.rewards[tier]
-    if (mode === 'single' && entries.length < 1) {
+  const allDrops = [
+    ...payload.stampConfig.surpriseDrops.map(d => ({ ...d, tier: 'surprise' as const })),
+    ...payload.stampConfig.bigRewards.map(d => ({ ...d, tier: 'big' as const })),
+  ]
+
+  for (const drop of allDrops) {
+    const entries = payload.rewards[drop.tier][drop.id] ?? []
+    if (drop.mode === 'single' && entries.length < 1) {
       throw new Error('INVALID_STAMP_REWARDS')
     }
-    if (mode === 'pool') {
+    if (drop.mode === 'pool') {
       const total = entries.reduce((s, r) => s + r.winPercent, 0)
       if (total > 100 || total < 1) {
         throw new Error('INVALID_STAMP_POOL')
@@ -775,15 +802,23 @@ async function createStampCampaign(userId: string, payload: CreateStampCampaignP
 
   const rewardStatements: { sql: string; args: (string | number | null)[] }[] = []
   let sortOrder = 0
-  for (const tier of ['surprise', 'big'] as const) {
-    for (const r of payload.rewards[tier]) {
+  for (const drop of allDrops) {
+    const entries = payload.rewards[drop.tier][drop.id] ?? []
+    for (const r of entries) {
       rewardStatements.push({
-        sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO campaign_rewards (
+          id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+          redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           nanoid(), campaignId, r.name, r.description ?? '', r.icon,
-          payload.stampConfig[`${tier}Mode`] === 'single' ? 100 : r.winPercent,
-          sortOrder++, tier,
+          drop.mode === 'single' ? 100 : r.winPercent,
+          sortOrder++,
+          stampRewardTierKey(drop.tier, drop.id),
+          r.redeemExpiryMode,
+          r.redeemFixedDate ?? null,
+          r.redeemRelativeAmount ?? null,
+          r.redeemRelativeUnit ?? null,
         ],
       })
     }
@@ -1120,13 +1155,17 @@ async function updateStampCampaign(
     const config = stampConfig ?? parseStampConfig(existing.configJson)
     if (!config) throw new Error('INVALID_STAMP_CONFIG')
 
-    for (const tier of ['surprise', 'big'] as const) {
-      const mode = config[`${tier}Mode`]
-      const entries = payload.rewards[tier]
-      if (mode === 'single' && entries.length < 1) {
+    const allDrops = [
+      ...config.surpriseDrops.map(d => ({ ...d, tier: 'surprise' as const })),
+      ...config.bigRewards.map(d => ({ ...d, tier: 'big' as const })),
+    ]
+
+    for (const drop of allDrops) {
+      const entries = payload.rewards[drop.tier][drop.id] ?? []
+      if (drop.mode === 'single' && entries.length < 1) {
         throw new Error('INVALID_STAMP_REWARDS')
       }
-      if (mode === 'pool') {
+      if (drop.mode === 'pool') {
         const total = entries.reduce((s, r) => s + r.winPercent, 0)
         if (total > 100 || total < 1) {
           throw new Error('INVALID_STAMP_POOL')
@@ -1184,10 +1223,16 @@ async function updateStampCampaign(
     if (!config) throw new Error('INVALID_STAMP_CONFIG')
 
     const stampRewards = payload.rewards
+    const allDrops = [
+      ...config.surpriseDrops.map(d => ({ ...d, tier: 'surprise' as const })),
+      ...config.bigRewards.map(d => ({ ...d, tier: 'big' as const })),
+    ]
 
-    const existingByTier = {
-      surprise: existing.rewards.filter(r => r.rewardTier === 'surprise'),
-      big: existing.rewards.filter(r => r.rewardTier === 'big'),
+    const existingByTierKey = new Map<string, CampaignReward[]>()
+    for (const r of existing.rewards) {
+      const tier = r.rewardTier ?? ''
+      if (!existingByTierKey.has(tier)) existingByTierKey.set(tier, [])
+      existingByTierKey.get(tier)!.push(r)
     }
 
     const statements: { sql: string; args: (string | number | null)[] }[] = [
@@ -1195,24 +1240,33 @@ async function updateStampCampaign(
     ]
 
     let sortOrder = 0
-    for (const tier of ['surprise', 'big'] as const) {
-      for (const r of stampRewards[tier]) {
-        const tierExisting = existingByTier[tier]
+    for (const drop of allDrops) {
+      const tierKey = stampRewardTierKey(drop.tier, drop.id)
+      const tierExisting = [...(existingByTierKey.get(tierKey) ?? [])]
+      const entries = stampRewards[drop.tier][drop.id] ?? []
+
+      for (const r of entries) {
         const matchedId = r.id && tierExisting.some(x => x.id === r.id)
           ? r.id
           : tierExisting.shift()?.id ?? nanoid()
         statements.push({
-          sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          sql: `INSERT INTO campaign_rewards (
+            id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           args: [
             matchedId!,
             existing.id,
             r.name,
             r.description ?? '',
             r.icon,
-            config[`${tier}Mode`] === 'single' ? 100 : r.winPercent,
+            drop.mode === 'single' ? 100 : r.winPercent,
             sortOrder++,
-            tier,
+            tierKey,
+            r.redeemExpiryMode,
+            r.redeemFixedDate ?? null,
+            r.redeemRelativeAmount ?? null,
+            r.redeemRelativeUnit ?? null,
           ],
         })
       }

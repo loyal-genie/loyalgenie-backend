@@ -247,6 +247,7 @@ export async function ensureColumnPatches(): Promise<void> {
   await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
   await runOptional('ALTER TABLE customer_users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 1')
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
+  await runOptional('ALTER TABLE stamp_cards ADD COLUMN drop_triggers_json TEXT')
 }
 
 export async function migrate() {
@@ -269,6 +270,7 @@ export async function migrate() {
   await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
   await runOptional('ALTER TABLE customer_users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 1')
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
+  await runOptional('ALTER TABLE stamp_cards ADD COLUMN drop_triggers_json TEXT')
   await migrateRewardRedemptionStatuses()
   await migrateShakeWinRateToPlayerBased()
   await migrateShakeWinnerCaps()

@@ -11,6 +11,7 @@ import {
   getClaimDeadline,
   getEnrollmentCloseDate,
   expireStaleStampCampaigns,
+  parseDropTriggersFromRow,
 } from './stamp-cards.js'
 import {
   parseCheckInConfig,
@@ -205,8 +206,17 @@ export async function getBusinessCampaignStates(
           stampsCollected: Number(card?.stamps_collected ?? 0),
           totalStamps: meta.config.totalStamps,
           prefillStamps: meta.config.prefillStamps,
-          surpriseRange: meta.config.surpriseRange,
-          bigRange: meta.config.bigRange,
+          surpriseDrops: meta.config.surpriseDrops,
+          bigRewards: meta.config.bigRewards,
+          dropTriggers: card
+            ? parseDropTriggersFromRow(card as Record<string, unknown>, meta.config)
+            : [],
+          surpriseRange: meta.config.surpriseDrops[0]
+            ? [meta.config.surpriseDrops[0].from, meta.config.surpriseDrops[0].to] as [number, number]
+            : [1, 1],
+          bigRange: meta.config.bigRewards[0]
+            ? [meta.config.bigRewards[0].from, meta.config.bigRewards[0].to] as [number, number]
+            : [1, 1],
           surpriseAwarded: Boolean(card?.surprise_awarded),
           bigAwarded: Boolean(card?.big_awarded),
           surpriseTriggerAt: (card?.surprise_trigger_at as string) ?? null,
