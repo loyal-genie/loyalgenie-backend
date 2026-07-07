@@ -174,6 +174,12 @@ const COLUMN_PATCHES_CAMPAIGNS = [
   'ALTER TABLE campaigns ADD COLUMN previous_pin_valid_until TEXT',
   'ALTER TABLE campaigns ADD COLUMN overall_winners INTEGER',
   'ALTER TABLE campaigns ADD COLUMN daily_winner_cap INTEGER',
+  'ALTER TABLE campaigns ADD COLUMN start_time TEXT NOT NULL DEFAULT \'00:00\'',
+  'ALTER TABLE campaigns ADD COLUMN end_time TEXT NOT NULL DEFAULT \'23:59\'',
+  'ALTER TABLE campaign_rewards ADD COLUMN redeem_expiry_mode TEXT',
+  'ALTER TABLE campaign_rewards ADD COLUMN redeem_fixed_date TEXT',
+  'ALTER TABLE campaign_rewards ADD COLUMN redeem_relative_amount INTEGER',
+  'ALTER TABLE campaign_rewards ADD COLUMN redeem_relative_unit TEXT',
 ]
 
 const STAMP_CARD_MIGRATIONS = `
@@ -234,6 +240,16 @@ async function runOptional(sql: string) {
   }
 }
 
+export async function ensureColumnPatches(): Promise<void> {
+  for (const sql of COLUMN_PATCHES) await runOptional(sql)
+  for (const sql of INDEX_PATCHES) await runOptional(sql)
+  for (const sql of COLUMN_PATCHES_CAMPAIGNS) await runOptional(sql)
+  await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
+  await runOptional('ALTER TABLE customer_users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 1')
+  await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
+  await runOptional('ALTER TABLE stamp_cards ADD COLUMN drop_triggers_json TEXT')
+}
+
 export async function migrate() {
   await db.executeMultiple(MIGRATIONS_CORE)
   for (const sql of COLUMN_PATCHES) await runOptional(sql)
@@ -254,6 +270,7 @@ export async function migrate() {
   await runOptional('ALTER TABLE customer_users ADD COLUMN gender TEXT')
   await runOptional('ALTER TABLE customer_users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 1')
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
+  await runOptional('ALTER TABLE stamp_cards ADD COLUMN drop_triggers_json TEXT')
   await migrateRewardRedemptionStatuses()
   await migrateShakeWinRateToPlayerBased()
   await migrateShakeWinnerCaps()

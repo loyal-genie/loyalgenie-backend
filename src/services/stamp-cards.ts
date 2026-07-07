@@ -16,15 +16,22 @@ import {
 import {
   stampConfigSchema,
   createStampCampaignSchema,
+  normalizeStampConfig,
+  stampRewardTierKey,
+  parseStampRewardTier,
   type CreateStampCampaignPayload,
   type StampConfig,
+  type StampDrop,
 } from './stamp-campaign-schema.js'
+import { computeRedeemExpiryDate } from '../utils/redeem-expiry.js'
 
 export {
   stampConfigSchema,
   createStampCampaignSchema,
+  normalizeStampConfig,
   type CreateStampCampaignPayload,
   type StampConfig,
+  type StampDrop,
 } from './stamp-campaign-schema.js'
 
 export interface StampCardRow {
@@ -36,11 +43,19 @@ export interface StampCardRow {
   bigTriggerAt: number
   surpriseAwarded: boolean
   bigAwarded: boolean
+  dropTriggers: DropTriggerState[]
   status: 'active' | 'completed' | 'expired'
   enrolledAt: string
   completedAt: string | null
   expiredAt: string | null
   lastStampDate: string | null
+}
+
+export interface DropTriggerState {
+  dropId: string
+  tier: 'surprise' | 'big'
+  triggerAt: number
+  awarded: boolean
 }
 
 export interface StampCampaignMeta {
@@ -54,18 +69,89 @@ function isStampRangeValid(from: number, to: number, totalStamps: number): boole
 }
 
 export function validateStampConfig(config: StampConfig): void {
-  const { totalStamps, prefillStamps, surpriseRange, bigRange } = config
-  const [sFrom, sTo] = surpriseRange
-  const [bFrom, bTo] = bigRange
+  const { totalStamps, prefillStamps, surpriseDrops, bigRewards } = config
 
   if (prefillStamps < 0 || prefillStamps > totalStamps) {
     throw new Error('INVALID_STAMP_CONFIG')
   }
-  if (!isStampRangeValid(sFrom, sTo, totalStamps)) {
-    throw new Error('INVALID_STAMP_CONFIG')
+
+  for (const drop of [...surpriseDrops, ...bigRewards]) {
+    if (!isStampRangeValid(drop.from, drop.to, totalStamps)) {
+      throw new Error('INVALID_STAMP_CONFIG')
+    }
   }
-  if (!isStampRangeValid(bFrom, bTo, totalStamps)) {
-    throw new Error('INVALID_STAMP_CONFIG')
+}
+
+function buildDropTriggersForEnroll(config: StampConfig): DropTriggerState[] {
+  const triggers: DropTriggerState[] = []
+  for (const drop of config.surpriseDrops) {
+    triggers.push({
+      dropId: drop.id,
+      tier: 'surprise',
+      triggerAt: randomIntInclusive(drop.from, drop.to),
+      awarded: false,
+    })
+  }
+  for (const drop of config.bigRewards) {
+    triggers.push({
+      dropId: drop.id,
+      tier: 'big',
+      triggerAt: randomIntInclusive(drop.from, drop.to),
+      awarded: false,
+    })
+  }
+  return triggers
+}
+
+export function parseDropTriggersFromRow(row: Record<string, unknown>, config: StampConfig): DropTriggerState[] {
+  const raw = row.drop_triggers_json as string | null
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as DropTriggerState[]
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+    } catch {
+      /* fall through */
+    }
+  }
+
+  const surpriseTriggerAt = row.surprise_trigger_at as number
+  const bigTriggerAt = row.big_trigger_at as number
+  const surpriseAwarded = Boolean(row.surprise_awarded)
+  const bigAwarded = Boolean(row.big_awarded)
+
+  return [
+    ...config.surpriseDrops.map((drop, i) => ({
+      dropId: drop.id,
+      tier: 'surprise' as const,
+      triggerAt: i === 0 ? surpriseTriggerAt : randomIntInclusive(drop.from, drop.to),
+      awarded: i === 0 ? surpriseAwarded : false,
+    })),
+    ...config.bigRewards.map((drop, i) => ({
+      dropId: drop.id,
+      tier: 'big' as const,
+      triggerAt: i === 0 ? bigTriggerAt : randomIntInclusive(drop.from, drop.to),
+      awarded: i === 0 ? bigAwarded : false,
+    })),
+  ]
+}
+
+function serializeDropTriggers(triggers: DropTriggerState[]): string {
+  return JSON.stringify(triggers)
+}
+
+function syncLegacyTriggerColumns(triggers: DropTriggerState[]): {
+  surpriseTriggerAt: number
+  bigTriggerAt: number
+  surpriseAwarded: boolean
+  bigAwarded: boolean
+} {
+  const firstSurprise = triggers.find(t => t.tier === 'surprise')
+  const firstBig = triggers.find(t => t.tier === 'big')
+  return {
+    surpriseTriggerAt: firstSurprise?.triggerAt ?? 1,
+    bigTriggerAt: firstBig?.triggerAt ?? 1,
+    surpriseAwarded: triggers.some(t => t.tier === 'surprise' && t.awarded),
+    bigAwarded: triggers.some(t => t.tier === 'big' && t.awarded),
   }
 }
 
@@ -74,10 +160,10 @@ export function parseStampConfig(json: string | null | undefined): StampConfig |
   try {
     const parsed = JSON.parse(json) as Record<string, unknown>
     if (parsed.type === 'stamp' && parsed.stampConfig) {
-      return stampConfigSchema.parse(parsed.stampConfig)
+      return normalizeStampConfig(parsed.stampConfig)
     }
     if (parsed.totalStamps !== undefined) {
-      return stampConfigSchema.parse(parsed)
+      return normalizeStampConfig(parsed)
     }
   } catch {
     return null
@@ -153,16 +239,36 @@ export function isPinActiveForStamp(
   return isStampCampaignActive(status, startDate, endDate, claimPeriodDays, capFilledAt, today)
 }
 
-function rowToStampCard(row: Record<string, unknown>): StampCardRow {
+function rowToStampCard(row: Record<string, unknown>, config?: StampConfig | null): StampCardRow {
+  const dropTriggers = config
+    ? parseDropTriggersFromRow(row, config)
+    : []
+  const legacy = syncLegacyTriggerColumns(dropTriggers.length > 0 ? dropTriggers : [{
+    dropId: 'surprise-0', tier: 'surprise', triggerAt: row.surprise_trigger_at as number, awarded: Boolean(row.surprise_awarded),
+  }, {
+    dropId: 'big-0', tier: 'big', triggerAt: row.big_trigger_at as number, awarded: Boolean(row.big_awarded),
+  }])
+
   return {
     id: row.id as string,
     campaignId: row.campaign_id as string,
     customerId: row.customer_id as string,
     stampsCollected: row.stamps_collected as number,
-    surpriseTriggerAt: row.surprise_trigger_at as number,
-    bigTriggerAt: row.big_trigger_at as number,
-    surpriseAwarded: Boolean(row.surprise_awarded),
-    bigAwarded: Boolean(row.big_awarded),
+    surpriseTriggerAt: legacy.surpriseTriggerAt,
+    bigTriggerAt: legacy.bigTriggerAt,
+    surpriseAwarded: legacy.surpriseAwarded,
+    bigAwarded: legacy.bigAwarded,
+    dropTriggers: dropTriggers.length > 0 ? dropTriggers : [{
+      dropId: 'surprise-0',
+      tier: 'surprise',
+      triggerAt: row.surprise_trigger_at as number,
+      awarded: Boolean(row.surprise_awarded),
+    }, {
+      dropId: 'big-0',
+      tier: 'big',
+      triggerAt: row.big_trigger_at as number,
+      awarded: Boolean(row.big_awarded),
+    }],
     status: row.status as StampCardRow['status'],
     enrolledAt: row.enrolled_at as string,
     completedAt: (row.completed_at as string) ?? null,
@@ -229,44 +335,54 @@ function verifyStampPinOnRow(row: Record<string, unknown>, pin: string): void {
   }
 }
 
-async function fetchStampCard(campaignId: string, customerId: string): Promise<StampCardRow | null> {
+async function fetchStampCard(campaignId: string, customerId: string, config?: StampConfig | null): Promise<StampCardRow | null> {
   const result = await db.execute({
     sql: 'SELECT * FROM stamp_cards WHERE campaign_id = ? AND customer_id = ?',
     args: [campaignId, customerId],
   })
   const row = result.rows[0]
-  return row ? rowToStampCard(row as Record<string, unknown>) : null
+  return row ? rowToStampCard(row as Record<string, unknown>, config) : null
 }
 
-async function fetchTierRewards(campaignId: string, tier: 'surprise' | 'big'): Promise<CampaignReward[]> {
-  const batch = await fetchStampTierRewards(campaignId)
-  return tier === 'surprise' ? batch.surprise : batch.big
-}
+export type StampTierRewards = Record<string, CampaignReward[]>
 
-async function fetchStampTierRewards(campaignId: string): Promise<{
-  surprise: CampaignReward[]
-  big: CampaignReward[]
-}> {
+async function fetchStampTierRewards(campaignId: string): Promise<StampTierRewards> {
   const result = await db.execute({
-    sql: `SELECT id, name, description, icon, share_percent, reward_tier FROM campaign_rewards
-          WHERE campaign_id = ? AND reward_tier IN ('surprise', 'big')
+    sql: `SELECT id, name, description, icon, share_percent, reward_tier,
+                 redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit
+          FROM campaign_rewards
+          WHERE campaign_id = ? AND reward_tier IS NOT NULL
           ORDER BY sort_order ASC`,
     args: [campaignId],
   })
-  const surprise: CampaignReward[] = []
-  const big: CampaignReward[] = []
+
+  const map: StampTierRewards = {}
   for (const row of result.rows) {
-    const reward: CampaignReward = {
+    const parsed = parseStampRewardTier(row.reward_tier as string)
+    if (!parsed) continue
+    const key = `${parsed.tier}:${parsed.dropId}`
+    if (!map[key]) map[key] = []
+    map[key]!.push({
       id: row.id as string,
       name: row.name as string,
       description: (row.description as string) ?? '',
       icon: (row.icon as string) ?? '🎁',
       sharePercent: row.share_percent as number,
-    }
-    if (row.reward_tier === 'surprise') surprise.push(reward)
-    else if (row.reward_tier === 'big') big.push(reward)
+      redeemExpiryMode: (row.redeem_expiry_mode as 'fixed' | 'relative') ?? 'relative',
+      redeemFixedDate: (row.redeem_fixed_date as string) ?? null,
+      redeemRelativeAmount: row.redeem_relative_amount != null ? Number(row.redeem_relative_amount) : null,
+      redeemRelativeUnit: (row.redeem_relative_unit as 'day' | 'week' | 'month' | null) ?? null,
+    })
   }
-  return { surprise, big }
+  return map
+}
+
+function rewardsForDrop(
+  rewardsByKey: StampTierRewards,
+  tier: 'surprise' | 'big',
+  dropId: string,
+): CampaignReward[] {
+  return rewardsByKey[`${tier}:${dropId}`] ?? rewardsByKey[`${tier}:${dropId === 'surprise-0' || dropId === 'big-0' ? dropId : dropId}`] ?? []
 }
 
 function rowToStampCardFromInsert(
@@ -274,18 +390,19 @@ function rowToStampCardFromInsert(
   campaignId: string,
   customerId: string,
   initialStamps: number,
-  surpriseTriggerAt: number,
-  bigTriggerAt: number,
+  dropTriggers: DropTriggerState[],
 ): StampCardRow {
+  const legacy = syncLegacyTriggerColumns(dropTriggers)
   return {
     id: cardId,
     campaignId,
     customerId,
     stampsCollected: initialStamps,
-    surpriseTriggerAt,
-    bigTriggerAt,
-    surpriseAwarded: false,
-    bigAwarded: false,
+    surpriseTriggerAt: legacy.surpriseTriggerAt,
+    bigTriggerAt: legacy.bigTriggerAt,
+    surpriseAwarded: legacy.surpriseAwarded,
+    bigAwarded: legacy.bigAwarded,
+    dropTriggers,
     status: 'active',
     enrolledAt: new Date().toISOString(),
     completedAt: null,
@@ -294,12 +411,13 @@ function rowToStampCardFromInsert(
   }
 }
 
-function applyTriggerFlagsToCard(card: StampCardRow, tier: 'surprise' | 'big'): void {
-  if (tier === 'surprise') {
-    card.surpriseAwarded = true
-  } else {
-    card.bigAwarded = true
-  }
+function applyTriggerFlagsToCard(card: StampCardRow, trigger: DropTriggerState): void {
+  card.dropTriggers = card.dropTriggers.map(t =>
+    t.dropId === trigger.dropId ? { ...t, awarded: true } : t,
+  )
+  const legacy = syncLegacyTriggerColumns(card.dropTriggers)
+  card.surpriseAwarded = legacy.surpriseAwarded
+  card.bigAwarded = legacy.bigAwarded
 }
 
 export function rollPoolReward(rewards: CampaignReward[]): CampaignReward | null {
@@ -320,7 +438,8 @@ function generateRedemptionCode(customerId: string): string {
 }
 
 interface TriggerResult {
-  tier: 'surprise' | 'big' | null
+  tier: 'surprise' | 'big'
+  dropId: string
   won: boolean
   reward: CampaignReward | null
   code: string | null
@@ -329,32 +448,38 @@ interface TriggerResult {
 
 async function evaluateTriggers(
   card: StampCardRow,
-  campaignId: string,
   customerId: string,
   config: StampConfig,
-  surpriseRewards: CampaignReward[],
-  bigRewards: CampaignReward[],
+  rewardsByKey: StampTierRewards,
 ): Promise<TriggerResult[]> {
   const results: TriggerResult[] = []
 
-  if (!card.surpriseAwarded && card.stampsCollected >= card.surpriseTriggerAt) {
-    const reward = config.surpriseMode === 'single'
-      ? surpriseRewards[0] ?? null
-      : rollPoolReward(surpriseRewards)
+  for (const drop of config.surpriseDrops) {
+    const trigger = card.dropTriggers.find(t => t.dropId === drop.id)
+    if (!trigger || trigger.awarded || card.stampsCollected < trigger.triggerAt) continue
+
+    const rewards = rewardsForDrop(rewardsByKey, 'surprise', drop.id)
+    const reward = drop.mode === 'single'
+      ? rewards[0] ?? null
+      : rollPoolReward(rewards)
     const won = reward !== null
     const playId = nanoid()
     const code = won ? generateRedemptionCode(customerId) : null
-    results.push({ tier: 'surprise', won, reward, code, playId })
+    results.push({ tier: 'surprise', dropId: drop.id, won, reward, code, playId })
   }
 
-  if (!card.bigAwarded && card.stampsCollected >= card.bigTriggerAt) {
-    const reward = config.bigMode === 'single'
-      ? bigRewards[0] ?? null
-      : rollPoolReward(bigRewards)
+  for (const drop of config.bigRewards) {
+    const trigger = card.dropTriggers.find(t => t.dropId === drop.id)
+    if (!trigger || trigger.awarded || card.stampsCollected < trigger.triggerAt) continue
+
+    const rewards = rewardsForDrop(rewardsByKey, 'big', drop.id)
+    const reward = drop.mode === 'single'
+      ? rewards[0] ?? null
+      : rollPoolReward(rewards)
     const won = reward !== null
     const playId = nanoid()
     const code = won ? generateRedemptionCode(customerId) : null
-    results.push({ tier: 'big', won, reward, code, playId })
+    results.push({ tier: 'big', dropId: drop.id, won, reward, code, playId })
   }
 
   return results
@@ -420,7 +545,7 @@ export async function getStampState(campaignId: string, customerId: string) {
   )
   await expireStaleCards(campaignId, claimDeadline, today)
 
-  const card = await fetchStampCard(campaignId, customerId)
+  const card = await fetchStampCard(campaignId, customerId, meta.config)
   const enrollmentOpen = isEnrollmentOpen(
     campaign.startDate,
     campaign.endDate,
@@ -447,12 +572,19 @@ export async function getStampState(campaignId: string, customerId: string) {
     stampsCollected: card?.stampsCollected ?? 0,
     totalStamps: meta.config.totalStamps,
     prefillStamps: meta.config.prefillStamps,
-    surpriseRange: meta.config.surpriseRange,
-    bigRange: meta.config.bigRange,
+    surpriseDrops: meta.config.surpriseDrops,
+    bigRewards: meta.config.bigRewards,
+    dropTriggers: card?.dropTriggers ?? [],
+    surpriseRange: meta.config.surpriseDrops[0]
+      ? [meta.config.surpriseDrops[0].from, meta.config.surpriseDrops[0].to] as [number, number]
+      : [1, 1],
+    bigRange: meta.config.bigRewards[0]
+      ? [meta.config.bigRewards[0].from, meta.config.bigRewards[0].to] as [number, number]
+      : [1, 1],
     surpriseAwarded: card?.surpriseAwarded ?? false,
     bigAwarded: card?.bigAwarded ?? false,
-    surpriseTriggerAt: card?.surpriseTriggerAt ?? null,
-    bigTriggerAt: card?.bigTriggerAt ?? null,
+    surpriseTriggerAt: card?.dropTriggers.find(t => t.tier === 'surprise')?.triggerAt ?? card?.surpriseTriggerAt ?? null,
+    bigTriggerAt: card?.dropTriggers.find(t => t.tier === 'big')?.triggerAt ?? card?.bigTriggerAt ?? null,
     status: card?.status ?? null,
     claimDeadline,
     enrollmentCloseDate: getEnrollmentCloseDate(campaign.endDate, meta.capFilledAt),
@@ -500,7 +632,7 @@ async function executeStampCollectInternal(
   customerId: string,
   campaignRow: Record<string, unknown>,
   cardInitial: StampCardRow | null,
-  tierRewards: { surprise: CampaignReward[]; big: CampaignReward[] },
+  tierRewards: StampTierRewards,
 ) {
   const today = todayInCampaignTz()
 
@@ -508,6 +640,11 @@ async function executeStampCollectInternal(
 
   const meta = parseStampCampaignMeta(campaignRow)
   if (!meta) throw new Error('INVALID_STAMP_CONFIG')
+
+  let card = cardInitial
+  if (card) {
+    card = await fetchStampCard(campaignId, customerId, meta.config) ?? card
+  }
 
   const status = campaignRow.status as string
   const startDate = campaignRow.start_date as string
@@ -533,7 +670,6 @@ async function executeStampCollectInternal(
   }
 
   const statements: SqlStatement[] = []
-  let card = cardInitial
   const isNew = !card
   const allTriggerOutcomes: AppliedTrigger[] = []
 
@@ -550,8 +686,8 @@ async function executeStampCollectInternal(
       throw new Error('USER_CAP_REACHED')
     }
 
-    const surpriseTriggerAt = randomIntInclusive(...meta.config.surpriseRange)
-    const bigTriggerAt = randomIntInclusive(...meta.config.bigRange)
+    const dropTriggers = buildDropTriggersForEnroll(meta.config)
+    const legacy = syncLegacyTriggerColumns(dropTriggers)
     const cardId = nanoid()
     const initialStamps = meta.config.prefillStamps
 
@@ -559,9 +695,12 @@ async function executeStampCollectInternal(
       {
         sql: `INSERT INTO stamp_cards (
           id, campaign_id, customer_id, stamps_collected,
-          surprise_trigger_at, big_trigger_at, status, enrolled_at, last_stamp_date
-        ) VALUES (?, ?, ?, ?, ?, ?, 'active', datetime('now'), NULL)`,
-        args: [cardId, campaignId, customerId, initialStamps, surpriseTriggerAt, bigTriggerAt],
+          surprise_trigger_at, big_trigger_at, drop_triggers_json, status, enrolled_at, last_stamp_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), NULL)`,
+        args: [
+          cardId, campaignId, customerId, initialStamps,
+          legacy.surpriseTriggerAt, legacy.bigTriggerAt, serializeDropTriggers(dropTriggers),
+        ],
       },
       {
         sql: `INSERT INTO campaign_participations
@@ -571,14 +710,10 @@ async function executeStampCollectInternal(
       },
     )
 
-    card = rowToStampCardFromInsert(
-      cardId, campaignId, customerId, initialStamps, surpriseTriggerAt, bigTriggerAt,
-    )
+    card = rowToStampCardFromInsert(cardId, campaignId, customerId, initialStamps, dropTriggers)
     void maybeMarkCapFilled(campaignId, userCap)
 
-    const prefillTriggers = await evaluateTriggers(
-      card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
-    )
+    const prefillTriggers = await evaluateTriggers(card, customerId, meta.config, tierRewards)
     allTriggerOutcomes.push(
       ...buildTriggerStatements(card, campaignId, businessId, customerId, prefillTriggers, statements),
     )
@@ -613,9 +748,7 @@ async function executeStampCollectInternal(
   card.stampsCollected = newStampCount
   card.lastStampDate = today
 
-  const collectTriggers = await evaluateTriggers(
-    card, campaignId, customerId, meta.config, tierRewards.surprise, tierRewards.big,
-  )
+  const collectTriggers = await evaluateTriggers(card, customerId, meta.config, tierRewards)
   allTriggerOutcomes.push(
     ...buildTriggerStatements(card, campaignId, businessId, customerId, collectTriggers, statements),
   )
@@ -653,6 +786,7 @@ async function executeStampCollectInternal(
 
 interface AppliedTrigger {
   tier: 'surprise' | 'big'
+  dropId: string
   won: boolean
   reward: CampaignReward | null
   code: string | null
@@ -669,7 +803,7 @@ function buildTriggerStatements(
   const applied: AppliedTrigger[] = []
 
   for (const t of triggers) {
-    if (!t.tier || !t.playId) continue
+    if (!t.playId) continue
 
     statements.push({
       sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
@@ -683,30 +817,42 @@ function buildTriggerStatements(
       ],
     })
 
-    if (t.tier === 'surprise') {
-      statements.push({
-        sql: `UPDATE stamp_cards SET surprise_awarded = 1, surprise_play_id = ? WHERE id = ?`,
-        args: [t.playId, card.id],
-      })
-    } else {
-      statements.push({
-        sql: `UPDATE stamp_cards SET big_awarded = 1, big_play_id = ? WHERE id = ?`,
-        args: [t.playId, card.id],
-      })
-    }
+    applyTriggerFlagsToCard(card, {
+      dropId: t.dropId,
+      tier: t.tier,
+      triggerAt: card.dropTriggers.find(d => d.dropId === t.dropId)?.triggerAt ?? 0,
+      awarded: true,
+    })
+
+    const legacy = syncLegacyTriggerColumns(card.dropTriggers)
+    statements.push({
+      sql: `UPDATE stamp_cards SET drop_triggers_json = ?, surprise_awarded = ?, big_awarded = ? WHERE id = ?`,
+      args: [
+        serializeDropTriggers(card.dropTriggers),
+        legacy.surpriseAwarded ? 1 : 0,
+        legacy.bigAwarded ? 1 : 0,
+        card.id,
+      ],
+    })
 
     if (t.won && t.reward && t.code) {
+      const redeemExpiresAt = computeRedeemExpiryDate(
+        t.reward.redeemExpiryMode ?? 'relative',
+        t.reward.redeemFixedDate ?? null,
+        t.reward.redeemRelativeAmount ?? 7,
+        t.reward.redeemRelativeUnit ?? 'day',
+      )
       statements.push({
         sql: `INSERT INTO customer_rewards
-              (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'campaign_win')`,
-        args: [nanoid(), customerId, campaignId, t.playId, t.reward.name, t.reward.icon, t.code, businessId],
+              (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type, redeem_expires_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'campaign_win', ?)`,
+        args: [nanoid(), customerId, campaignId, t.playId, t.reward.name, t.reward.icon, t.code, businessId, redeemExpiresAt],
       })
     }
 
-    applyTriggerFlagsToCard(card, t.tier)
     applied.push({
       tier: t.tier,
+      dropId: t.dropId,
       won: t.won,
       reward: t.reward,
       code: t.code,

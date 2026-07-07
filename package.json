@@ -13,6 +13,7 @@
     "db:enable-realtime-extended": "tsx scripts/apply-realtime-extended.ts",
     "db:drop-blobs": "tsx scripts/apply-drop-blobs.ts",
     "db:apply-rewards-module": "tsx scripts/apply-rewards-module.ts",
+    "db:apply-campaign-times": "tsx scripts/apply-campaign-times-reward-expiry.ts",
     "db:cleanup": "tsx scripts/cleanup-supabase.ts",
     "r2:cleanup": "tsx scripts/cleanup-r2.ts",
     "r2:configure-cors": "tsx scripts/configure-r2-cors.ts",
