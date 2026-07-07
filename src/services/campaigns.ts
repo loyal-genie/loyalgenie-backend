@@ -35,6 +35,17 @@ import {
   type CreateCheckInLoyaltyCampaignPayload,
 } from './check-in-loyalty-schema.js'
 import { getLoyaltyCampaignStats, type LoyaltyCampaignStats } from './check-in-loyalty.js'
+import {
+  createSpinCampaignSchema,
+  parseSpinConfig,
+  spinOverallWinners,
+  spinRewardShares,
+  spinWinRatePercent,
+  spinConfigSchema,
+  validateSpinConfig,
+  type CreateSpinCampaignPayload,
+  type SpinSegment,
+} from './spin-campaign-schema.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 import { TtlCache } from '../utils/ttl-cache.js'
 import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
@@ -95,6 +106,7 @@ export const createShakeCampaignSchema = z.object({
 
 export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createShakeCampaignSchema,
+  createSpinCampaignSchema,
   createStampCampaignSchema,
   createCheckInLoyaltyCampaignSchema,
 ])
@@ -140,6 +152,8 @@ export const updateCampaignSchema = z.object({
   stampConfig: stampConfigSchema.optional(),
   checkInConfig: checkInLoyaltyConfigSchema.optional(),
   milestones: z.array(updateLoyaltyMilestoneSchema).optional(),
+  spinConfig: spinConfigSchema.optional(),
+  startTime: timeSchema.optional(),
 })
 
 export interface UpdateCampaignPayload {
@@ -170,6 +184,8 @@ export interface UpdateCampaignPayload {
   stampConfig?: z.infer<typeof stampConfigSchema>
   checkInConfig?: z.infer<typeof checkInLoyaltyConfigSchema>
   milestones?: { id?: string; name: string; description?: string; icon: string; pointsThreshold: number }[]
+  spinConfig?: z.infer<typeof spinConfigSchema>
+  startTime?: string
 }
 
 type StampTierRewards = {
@@ -264,6 +280,7 @@ export interface CampaignRow {
   redeemedCount: number
   stampStats?: StampCampaignStats | null
   loyaltyStats?: LoyaltyCampaignStats | null
+  spinConfig?: z.infer<typeof spinConfigSchema> | null
 }
 
 /** Lightweight campaign read — no stats/rewards aggregation (hot paths). */
@@ -693,6 +710,9 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'check-in-loyalty') {
     base.loyaltyStats = await getLoyaltyCampaignStats(id)
   }
+  if (mechanic === 'spin') {
+    base.spinConfig = parseSpinConfig(base.configJson)
+  }
   return base
 }
 
@@ -761,6 +781,65 @@ async function createShakeCampaign(userId: string, payload: CreateShakeCampaignP
         nanoid(), campaignId, r.name, r.description ?? '', r.icon, r.sharePercent, i,
         r.redeemExpiryMode, r.redeemFixedDate ?? null,
         r.redeemRelativeAmount ?? null, r.redeemRelativeUnit ?? null,
+      ],
+    })),
+  ]
+
+  await db.batch(statements)
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createSpinCampaign(userId: string, payload: CreateSpinCampaignPayload) {
+  validateSpinConfig(payload.spinConfig)
+
+  const winSegments = payload.spinConfig.segments.filter(s => s.isWin && (s.reward ?? '').trim())
+  const overallWinners = spinOverallWinners(payload.userCap, payload.spinConfig.segments)
+  if (overallWinners > payload.userCap) {
+    throw new Error('OVERALL_WINNERS_EXCEEDS_USER_CAP')
+  }
+
+  const shares = spinRewardShares(winSegments)
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('spin')
+  const perDayUserLimit =
+    payload.startDate === payload.endDate
+      ? payload.userCap
+      : Math.min(payload.perDayUserLimit, payload.userCap)
+  const winRatePercent = spinWinRatePercent(payload.spinConfig.segments)
+  const configJson = JSON.stringify({
+    type: 'spin',
+    spinConfig: payload.spinConfig,
+  })
+
+  const statements = [
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'spin', 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap, perDayUserLimit, payload.playsPerDay,
+        winRatePercent, overallWinners, configJson,
+        pin, pinExpires,
+      ],
+    },
+    ...winSegments.map((seg, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      args: [
+        nanoid(), campaignId, (seg.reward ?? '').trim(), seg.description ?? '', seg.icon ?? '🎁', shares[i] ?? 100, i,
+        seg.redeemExpiryMode ?? 'relative',
+        seg.redeemExpiryMode === 'fixed' ? (seg.redeemFixedDate ?? null) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeAmount ?? 7) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeUnit ?? 'day') : null,
       ],
     })),
   ]
@@ -891,6 +970,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     created = await createStampCampaign(userId, payload)
   } else if (payload.mechanic === 'check-in-loyalty') {
     created = await createCheckInLoyaltyCampaignHandler(userId, payload)
+  } else if (payload.mechanic === 'spin') {
+    created = await createSpinCampaign(userId, payload)
   } else {
     created = await createShakeCampaign(userId, payload)
   }
@@ -960,6 +1041,8 @@ export async function updateCampaign(
     updated = await updateStampCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'check-in-loyalty') {
     updated = await updateLoyaltyCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'spin') {
+    updated = await updateSpinCampaign(userId, existing, payload)
   } else {
     updated = await updateShakeCampaign(userId, existing, payload)
   }
@@ -1139,6 +1222,127 @@ async function replaceShakeRewards(
     })),
   ]
   await db.batch(statements)
+}
+
+async function replaceSpinRewards(
+  campaignId: string,
+  existingRewards: CampaignReward[],
+  segments: SpinSegment[],
+) {
+  const winSegments = segments.filter(s => s.isWin && (s.reward ?? '').trim())
+  const shares = spinRewardShares(winSegments)
+  const existingIds = new Set(existingRewards.map(r => r.id))
+  const statements = [
+    {
+      sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
+      args: [campaignId],
+    },
+    ...winSegments.map((seg, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        seg.id && existingIds.has(seg.id) ? seg.id : nanoid(),
+        campaignId,
+        (seg.reward ?? '').trim(),
+        seg.description ?? '',
+        seg.icon ?? '🎁',
+        shares[i] ?? 100,
+        i,
+        seg.redeemExpiryMode ?? 'relative',
+        seg.redeemExpiryMode === 'fixed' ? (seg.redeemFixedDate ?? null) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeAmount ?? 7) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+  await db.batch(statements)
+}
+
+async function updateSpinCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (payload.spinConfig) {
+    validateSpinConfig(payload.spinConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?')
+    args.push(payload.userCap)
+  }
+  if (payload.playsPerDay !== undefined) {
+    fields.push('plays_per_day = ?')
+    args.push(payload.playsPerDay)
+  }
+  if (payload.perDayUserLimit !== undefined) {
+    fields.push('per_day_user_limit = ?')
+    args.push(payload.perDayUserLimit)
+  }
+  if (payload.status !== undefined) {
+    fields.push('status = ?')
+    args.push(payload.status)
+  }
+
+  const segments = payload.spinConfig?.segments
+  const userCapForRate = payload.userCap ?? existing.userCap
+
+  if (segments) {
+    const overallWinners = spinOverallWinners(userCapForRate, segments)
+    const winRatePercent = spinWinRatePercent(segments)
+    fields.push('overall_winners = ?', 'win_rate_percent = ?', 'config_json = ?')
+    args.push(
+      overallWinners,
+      winRatePercent,
+      JSON.stringify({ type: 'spin', spinConfig: payload.spinConfig }),
+    )
+  } else if (payload.userCap !== undefined) {
+    const config = parseSpinConfig(existing.configJson)
+    if (config) {
+      const overallWinners = spinOverallWinners(userCapForRate, config.segments)
+      const winRatePercent = spinWinRatePercent(config.segments)
+      fields.push('overall_winners = ?', 'win_rate_percent = ?')
+      args.push(overallWinners, winRatePercent)
+    }
+  }
+
+  if (fields.length === 0 && !payload.spinConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.spinConfig) {
+    await replaceSpinRewards(existing.id, existing.rewards, payload.spinConfig.segments)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
 }
 
 async function updateStampCampaign(
@@ -1725,6 +1929,11 @@ export async function getPublicCampaign(campaignId: string) {
   if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
+
+  const spinConfig = campaign.mechanic === 'spin'
+    ? parseSpinConfig(campaign.configJson)
+    : null
+
   return {
     id: campaign.id,
     businessId: campaign.businessId,
@@ -1736,6 +1945,7 @@ export async function getPublicCampaign(campaignId: string) {
     playsPerDay: campaign.playsPerDay,
     winRatePercent: campaign.winRatePercent,
     overallWinners: campaign.overallWinners,
+    ...(spinConfig ? { spinConfig } : {}),
     rewards: rewards.map(r => ({
       id: r.id,
       name: r.name,
@@ -2059,6 +2269,9 @@ export async function executeShakePlay(
   }
 
   const campaign = await getCampaignById(campaignId)
+  if (campaign.mechanic !== 'shake' && campaign.mechanic !== 'spin') {
+    throw new Error('INVALID_MECHANIC')
+  }
   const eligibility = await checkEligibility(campaign, customerId)
   if (!eligibility.canPlay) {
     const msg = eligibility.message
@@ -2113,9 +2326,9 @@ export async function executeShakePlay(
 
   statements.push({
     sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
-          VALUES (?, ?, ?, 'shake', ?, ?, ?, ?)`,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      playId, campaignId, customerId,
+      playId, campaignId, customerId, campaign.mechanic,
       won ? 1 : 0,
       reward?.id ?? null,
       reward?.name ?? null,
