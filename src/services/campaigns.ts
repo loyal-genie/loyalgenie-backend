@@ -835,7 +835,7 @@ async function createSpinCampaign(userId: string, payload: CreateSpinCampaignPay
               redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       args: [
-        nanoid(), campaignId, (seg.reward ?? '').trim(), seg.description ?? '', seg.icon ?? '🎁', shares[i] ?? 100, i,
+        seg.id ?? nanoid(), campaignId, (seg.reward ?? '').trim(), seg.description ?? '', seg.icon ?? '🎁', shares[i] ?? 100, i,
         seg.redeemExpiryMode ?? 'relative',
         seg.redeemExpiryMode === 'fixed' ? (seg.redeemFixedDate ?? null) : null,
         seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeAmount ?? 7) : null,
@@ -1226,12 +1226,11 @@ async function replaceShakeRewards(
 
 async function replaceSpinRewards(
   campaignId: string,
-  existingRewards: CampaignReward[],
+  _existingRewards: CampaignReward[],
   segments: SpinSegment[],
 ) {
   const winSegments = segments.filter(s => s.isWin && (s.reward ?? '').trim())
   const shares = spinRewardShares(winSegments)
-  const existingIds = new Set(existingRewards.map(r => r.id))
   const statements = [
     {
       sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
@@ -1242,7 +1241,7 @@ async function replaceSpinRewards(
               redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
-        seg.id && existingIds.has(seg.id) ? seg.id : nanoid(),
+        seg.id ?? nanoid(),
         campaignId,
         (seg.reward ?? '').trim(),
         seg.description ?? '',
