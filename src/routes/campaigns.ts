@@ -157,6 +157,9 @@ router.post('/', requireAuth, async (req, res) => {
           : 'Invalid spin wheel configuration',
       })
     }
+    if (message === 'INVALID_DICE_CONFIG' || message === 'INVALID_DICE_REDEEM') {
+      return res.status(422).json({ error: 'Invalid dice configuration — add at least one winning face with a reward' })
+    }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL' || message === 'INVALID_LOYALTY_MILESTONES') {
       return res.status(422).json({ error: message === 'INVALID_LOYALTY_MILESTONES' ? 'Milestone point thresholds must be unique' : 'Invalid stamp card configuration' })
     }
@@ -246,6 +249,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
           ? 'Wheel segment shares must sum to exactly 100%'
           : 'Invalid spin wheel configuration',
       })
+    }
+    if (message === 'INVALID_DICE_CONFIG' || message === 'INVALID_DICE_REDEEM') {
+      return res.status(422).json({ error: 'Invalid dice configuration — add at least one winning face with a reward' })
     }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL') {
       return res.status(422).json({ error: 'Invalid stamp card configuration' })

@@ -46,6 +46,17 @@ import {
   type CreateSpinCampaignPayload,
   type SpinSegment,
 } from './spin-campaign-schema.js'
+import {
+  createDiceCampaignSchema,
+  parseDiceConfig,
+  diceOverallWinners,
+  diceRewardShares,
+  diceWinRatePercent,
+  diceConfigSchema,
+  validateDiceConfig,
+  type CreateDiceCampaignPayload,
+  type DiceOutcome,
+} from './dice-campaign-schema.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 import { TtlCache } from '../utils/ttl-cache.js'
 import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
@@ -107,6 +118,7 @@ export const createShakeCampaignSchema = z.object({
 export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createShakeCampaignSchema,
   createSpinCampaignSchema,
+  createDiceCampaignSchema,
   createStampCampaignSchema,
   createCheckInLoyaltyCampaignSchema,
 ])
@@ -153,6 +165,7 @@ export const updateCampaignSchema = z.object({
   checkInConfig: checkInLoyaltyConfigSchema.optional(),
   milestones: z.array(updateLoyaltyMilestoneSchema).optional(),
   spinConfig: spinConfigSchema.optional(),
+  diceConfig: diceConfigSchema.optional(),
   startTime: timeSchema.optional(),
 })
 
@@ -185,6 +198,7 @@ export interface UpdateCampaignPayload {
   checkInConfig?: z.infer<typeof checkInLoyaltyConfigSchema>
   milestones?: { id?: string; name: string; description?: string; icon: string; pointsThreshold: number }[]
   spinConfig?: z.infer<typeof spinConfigSchema>
+  diceConfig?: z.infer<typeof diceConfigSchema>
   startTime?: string
 }
 
@@ -281,6 +295,7 @@ export interface CampaignRow {
   stampStats?: StampCampaignStats | null
   loyaltyStats?: LoyaltyCampaignStats | null
   spinConfig?: z.infer<typeof spinConfigSchema> | null
+  diceConfig?: z.infer<typeof diceConfigSchema> | null
 }
 
 /** Lightweight campaign read — no stats/rewards aggregation (hot paths). */
@@ -713,6 +728,9 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'spin') {
     base.spinConfig = parseSpinConfig(base.configJson)
   }
+  if (mechanic === 'dice') {
+    base.diceConfig = parseDiceConfig(base.configJson)
+  }
   return base
 }
 
@@ -849,6 +867,65 @@ async function createSpinCampaign(userId: string, payload: CreateSpinCampaignPay
   return campaignRowAfterCreate(campaignId)
 }
 
+async function createDiceCampaign(userId: string, payload: CreateDiceCampaignPayload) {
+  validateDiceConfig(payload.diceConfig)
+
+  const winOutcomes = payload.diceConfig.outcomes.filter(o => o.isWin && (o.reward ?? '').trim())
+  const overallWinners = diceOverallWinners(payload.userCap, payload.diceConfig.outcomes)
+  if (overallWinners > payload.userCap) {
+    throw new Error('OVERALL_WINNERS_EXCEEDS_USER_CAP')
+  }
+
+  const shares = diceRewardShares(winOutcomes)
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('dice')
+  const perDayUserLimit =
+    payload.startDate === payload.endDate
+      ? payload.userCap
+      : Math.min(payload.perDayUserLimit, payload.userCap)
+  const winRatePercent = diceWinRatePercent(payload.diceConfig.outcomes)
+  const configJson = JSON.stringify({
+    type: 'dice',
+    diceConfig: payload.diceConfig,
+  })
+
+  const statements = [
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'dice', 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap, perDayUserLimit, payload.playsPerDay,
+        winRatePercent, overallWinners, configJson,
+        pin, pinExpires,
+      ],
+    },
+    ...winOutcomes.map((outcome, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      args: [
+        outcome.id ?? nanoid(), campaignId, (outcome.reward ?? '').trim(), outcome.description ?? '', outcome.icon ?? '🎁', shares[i] ?? 100, i,
+        outcome.redeemExpiryMode ?? 'relative',
+        outcome.redeemExpiryMode === 'fixed' ? (outcome.redeemFixedDate ?? null) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeAmount ?? 7) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+
+  await db.batch(statements)
+
+  return campaignRowAfterCreate(campaignId)
+}
+
 async function createStampCampaign(userId: string, payload: CreateStampCampaignPayload) {
   validateStampConfig(payload.stampConfig)
 
@@ -972,6 +1049,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     created = await createCheckInLoyaltyCampaignHandler(userId, payload)
   } else if (payload.mechanic === 'spin') {
     created = await createSpinCampaign(userId, payload)
+  } else if (payload.mechanic === 'dice') {
+    created = await createDiceCampaign(userId, payload)
   } else {
     created = await createShakeCampaign(userId, payload)
   }
@@ -1043,6 +1122,8 @@ export async function updateCampaign(
     updated = await updateLoyaltyCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'spin') {
     updated = await updateSpinCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'dice') {
+    updated = await updateDiceCampaign(userId, existing, payload)
   } else {
     updated = await updateShakeCampaign(userId, existing, payload)
   }
@@ -1339,6 +1420,122 @@ async function updateSpinCampaign(
 
   if (payload.spinConfig) {
     await replaceSpinRewards(existing.id, existing.rewards, payload.spinConfig.segments)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceDiceRewards(campaignId: string, outcomes: DiceOutcome[]) {
+  const winOutcomes = outcomes.filter(o => o.isWin && (o.reward ?? '').trim())
+  const shares = diceRewardShares(winOutcomes)
+  const statements = [
+    {
+      sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
+      args: [campaignId],
+    },
+    ...winOutcomes.map((outcome, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        outcome.id ?? nanoid(),
+        campaignId,
+        (outcome.reward ?? '').trim(),
+        outcome.description ?? '',
+        outcome.icon ?? '🎁',
+        shares[i] ?? 100,
+        i,
+        outcome.redeemExpiryMode ?? 'relative',
+        outcome.redeemExpiryMode === 'fixed' ? (outcome.redeemFixedDate ?? null) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeAmount ?? 7) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+  await db.batch(statements)
+}
+
+async function updateDiceCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (payload.diceConfig) {
+    validateDiceConfig(payload.diceConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?')
+    args.push(payload.userCap)
+  }
+  if (payload.playsPerDay !== undefined) {
+    fields.push('plays_per_day = ?')
+    args.push(payload.playsPerDay)
+  }
+  if (payload.perDayUserLimit !== undefined) {
+    fields.push('per_day_user_limit = ?')
+    args.push(payload.perDayUserLimit)
+  }
+  if (payload.status !== undefined) {
+    fields.push('status = ?')
+    args.push(payload.status)
+  }
+
+  const outcomes = payload.diceConfig?.outcomes
+  const userCapForRate = payload.userCap ?? existing.userCap
+
+  if (outcomes) {
+    const overallWinners = diceOverallWinners(userCapForRate, outcomes)
+    const winRatePercent = diceWinRatePercent(outcomes)
+    fields.push('overall_winners = ?', 'win_rate_percent = ?', 'config_json = ?')
+    args.push(
+      overallWinners,
+      winRatePercent,
+      JSON.stringify({ type: 'dice', diceConfig: payload.diceConfig }),
+    )
+  } else if (payload.userCap !== undefined) {
+    const config = parseDiceConfig(existing.configJson)
+    if (config) {
+      const overallWinners = diceOverallWinners(userCapForRate, config.outcomes)
+      const winRatePercent = diceWinRatePercent(config.outcomes)
+      fields.push('overall_winners = ?', 'win_rate_percent = ?')
+      args.push(overallWinners, winRatePercent)
+    }
+  }
+
+  if (fields.length === 0 && !payload.diceConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.diceConfig) {
+    await replaceDiceRewards(existing.id, payload.diceConfig.outcomes)
   }
 
   return getCampaignForBusiness(userId, existing.id)
@@ -1932,6 +2129,9 @@ export async function getPublicCampaign(campaignId: string) {
   const spinConfig = campaign.mechanic === 'spin'
     ? parseSpinConfig(campaign.configJson)
     : null
+  const diceConfig = campaign.mechanic === 'dice'
+    ? parseDiceConfig(campaign.configJson)
+    : null
 
   return {
     id: campaign.id,
@@ -1945,6 +2145,7 @@ export async function getPublicCampaign(campaignId: string) {
     winRatePercent: campaign.winRatePercent,
     overallWinners: campaign.overallWinners,
     ...(spinConfig ? { spinConfig } : {}),
+    ...(diceConfig ? { diceConfig } : {}),
     rewards: rewards.map(r => ({
       id: r.id,
       name: r.name,
@@ -2268,7 +2469,7 @@ export async function executeShakePlay(
   }
 
   const campaign = await getCampaignById(campaignId)
-  if (campaign.mechanic !== 'shake' && campaign.mechanic !== 'spin') {
+  if (campaign.mechanic !== 'shake' && campaign.mechanic !== 'spin' && campaign.mechanic !== 'dice') {
     throw new Error('INVALID_MECHANIC')
   }
   const eligibility = await checkEligibility(campaign, customerId)

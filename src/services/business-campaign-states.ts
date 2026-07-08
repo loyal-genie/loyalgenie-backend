@@ -54,7 +54,7 @@ export async function getBusinessCampaignStates(
   if (rows.length === 0) return []
 
   const ids = rows.map(r => r.id as string)
-  const shakeIds = rows.filter(r => r.mechanic === 'shake' || r.mechanic === 'spin').map(r => r.id as string)
+  const shakeIds = rows.filter(r => r.mechanic === 'shake' || r.mechanic === 'spin' || r.mechanic === 'dice').map(r => r.id as string)
   const stampIds = rows.filter(r => r.mechanic === 'stamp').map(r => r.id as string)
   const loyaltyIds = rows.filter(r => r.mechanic === 'check-in-loyalty').map(r => r.id as string)
 
@@ -142,7 +142,7 @@ export async function getBusinessCampaignStates(
     const stats = statsMap.get(campaignId)!
     const campaign = mapRowToCampaignLite(row, stats.currentUsers)
 
-    if (mechanic === 'shake' || mechanic === 'spin') {
+    if (mechanic === 'shake' || mechanic === 'spin' || mechanic === 'dice') {
       const eligibility = await checkEligibility(campaign, customerId, {
         participation: partMap.get(campaignId) ?? null,
         totalUsers: stats.currentUsers,
