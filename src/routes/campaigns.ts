@@ -82,6 +82,9 @@ router.post('/customer/rewards/:id/request-redemption', requireCustomerAuth, asy
     if (message === 'ALREADY_REDEEMED') {
       return res.status(409).json({ error: 'Reward already redeemed' })
     }
+    if (message === 'REWARD_EXPIRED') {
+      return res.status(410).json({ error: 'Reward has expired' })
+    }
     console.error(err)
     res.status(500).json({ error: 'Failed to request redemption' })
   }

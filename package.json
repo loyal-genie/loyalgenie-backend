@@ -35,7 +35,8 @@
     "test:shake:e2e": "tsx scripts/test-shake-e2e-10-users.ts",
     "test:loyalty:e2e": "tsx scripts/test-check-in-loyalty-e2e.ts",
     "test:pin:boundary": "tsx scripts/test-pin-boundary.ts",
-    "test:customer:live": "tsx scripts/test-customer-live-e2e.ts"
+    "test:customer:live": "tsx scripts/test-customer-live-e2e.ts",
+    "test:redeem-expiry": "tsx scripts/test-redeem-expiry.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1075.0",

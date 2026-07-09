@@ -56,6 +56,12 @@ export function addCampaignDays(from: string, days: number): string {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
 }
 
+export function addCampaignMonths(from: string, months: number): string {
+  const [y, mo, d] = from.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, mo - 1 + months, d))
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
+}
+
 /** Next midnight IST as ISO string (PIN rotation for stamp campaigns). */
 export function nextMidnightIsoInCampaignTz(from = new Date()): string {
   const today = todayInCampaignTz(from)

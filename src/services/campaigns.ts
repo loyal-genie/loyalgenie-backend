@@ -2595,6 +2595,7 @@ export async function listCustomerRewards(customerId: string) {
     return {
       id: row.id as string,
       campaignId: row.campaign_id as string,
+      businessId: (row.business_id as string) ?? null,
       campaignName: row.campaign_name as string,
       mechanic: row.mechanic as string,
       reward: row.reward_name as string,
