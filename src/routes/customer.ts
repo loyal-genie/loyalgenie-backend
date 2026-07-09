@@ -8,6 +8,7 @@ import {
   updateCustomerProfileFields,
 } from '../services/customer.js'
 import { signToken } from '../services/auth.js'
+import { db } from '../db/client.js'
 
 const router = Router()
 
@@ -86,6 +87,20 @@ router.get('/notifications', requireCustomerAuth, async (req, res) => {
   } catch (err) {
     console.error('Get customer notifications error:', err)
     res.status(500).json({ error: 'Could not load notifications' })
+  }
+})
+
+router.post('/notifications/:id/mark-read', requireCustomerAuth, async (req, res) => {
+  try {
+    const notificationId = String(req.params.id)
+    await db.execute({
+      sql: `UPDATE customer_notifications SET read_at = datetime('now') WHERE id = ? AND customer_id = ?`,
+      args: [notificationId, req.user!.id],
+    })
+    res.json({ success: true })
+  } catch (err) {
+    console.error('Mark notification as read error:', err)
+    res.status(500).json({ error: 'Could not mark notification as read' })
   }
 })
 
