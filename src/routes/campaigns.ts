@@ -31,6 +31,11 @@ import {
   listCustomerLoyaltyProfiles,
 } from '../services/check-in-loyalty.js'
 import { getBusinessCampaignStates } from '../services/business-campaign-states.js'
+import {
+  claimLotteryTicket,
+  getLotteryState,
+  viewLotteryResult,
+} from '../services/lottery-service.js'
 
 const router = Router()
 
@@ -163,6 +168,9 @@ router.post('/', requireAuth, async (req, res) => {
     if (message === 'INVALID_DICE_CONFIG' || message === 'INVALID_DICE_REDEEM') {
       return res.status(422).json({ error: 'Invalid dice configuration — add at least one winning face with a reward' })
     }
+    if (message === 'INVALID_LOTTERY_CONFIG' || message === 'INVALID_LOTTERY_REDEEM') {
+      return res.status(422).json({ error: 'Invalid lottery configuration — add jackpot and redeem-before settings' })
+    }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL' || message === 'INVALID_LOYALTY_MILESTONES') {
       return res.status(422).json({ error: message === 'INVALID_LOYALTY_MILESTONES' ? 'Milestone point thresholds must be unique' : 'Invalid stamp card configuration' })
     }
@@ -255,6 +263,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
     if (message === 'INVALID_DICE_CONFIG' || message === 'INVALID_DICE_REDEEM') {
       return res.status(422).json({ error: 'Invalid dice configuration — add at least one winning face with a reward' })
+    }
+    if (message === 'INVALID_LOTTERY_CONFIG' || message === 'INVALID_LOTTERY_REDEEM') {
+      return res.status(422).json({ error: 'Invalid lottery configuration — add jackpot and redeem-before settings' })
     }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL') {
       return res.status(422).json({ error: 'Invalid stamp card configuration' })
@@ -444,6 +455,64 @@ router.post('/:id/check-in', requireCustomerAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to check in' })
+  }
+})
+
+router.get('/:id/lottery-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getLotteryState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_LOTTERY_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get lottery state' })
+  }
+})
+
+router.post('/:id/lottery/claim-ticket', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimLotteryTicket(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'TICKET_ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed your ticket for this draw' })
+    }
+    if (message === 'DRAW_ALREADY_COMPLETED') {
+      return res.status(403).json({ error: 'Draw has already completed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim ticket' })
+  }
+})
+
+router.post('/customer/rewards/:id/view-lottery-result', requireCustomerAuth, async (req, res) => {
+  try {
+    const result = await viewLotteryResult(req.user!.id, String(req.params.id))
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'VIEW_FAILED'
+    if (message === 'REWARD_NOT_FOUND') {
+      return res.status(404).json({ error: 'Reward not found' })
+    }
+    if (message === 'NOT_LOTTERY_REWARD' || message === 'INVALID_STATUS') {
+      return res.status(422).json({ error: 'Cannot update this reward status' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to update lottery result' })
   }
 })
 

@@ -57,6 +57,15 @@ import {
   type CreateDiceCampaignPayload,
   type DiceOutcome,
 } from './dice-campaign-schema.js'
+import {
+  createLotteryCampaignSchema,
+  parseLotteryConfig,
+  lotteryConfigSchema,
+  validateLotteryConfig,
+  serializeLotteryConfig,
+  type CreateLotteryCampaignPayload,
+} from './lottery-campaign-schema.js'
+import { LOTTERY_UNLIMITED_USER_CAP } from './lottery-service.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 import { TtlCache } from '../utils/ttl-cache.js'
 import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
@@ -121,6 +130,7 @@ export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createDiceCampaignSchema,
   createStampCampaignSchema,
   createCheckInLoyaltyCampaignSchema,
+  createLotteryCampaignSchema,
 ])
 
 export type CreateCampaignPayload = z.infer<typeof createCampaignSchema>
@@ -166,6 +176,7 @@ export const updateCampaignSchema = z.object({
   milestones: z.array(updateLoyaltyMilestoneSchema).optional(),
   spinConfig: spinConfigSchema.optional(),
   diceConfig: diceConfigSchema.optional(),
+  lotteryConfig: lotteryConfigSchema.optional(),
   startTime: timeSchema.optional(),
 })
 
@@ -199,6 +210,7 @@ export interface UpdateCampaignPayload {
   milestones?: { id?: string; name: string; description?: string; icon: string; pointsThreshold: number }[]
   spinConfig?: z.infer<typeof spinConfigSchema>
   diceConfig?: z.infer<typeof diceConfigSchema>
+  lotteryConfig?: z.infer<typeof lotteryConfigSchema>
   startTime?: string
 }
 
@@ -296,6 +308,7 @@ export interface CampaignRow {
   loyaltyStats?: LoyaltyCampaignStats | null
   spinConfig?: z.infer<typeof spinConfigSchema> | null
   diceConfig?: z.infer<typeof diceConfigSchema> | null
+  lotteryConfig?: z.infer<typeof lotteryConfigSchema> | null
 }
 
 /** Lightweight campaign read — no stats/rewards aggregation (hot paths). */
@@ -731,6 +744,9 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'dice') {
     base.diceConfig = parseDiceConfig(base.configJson)
   }
+  if (mechanic === 'lottery') {
+    base.lotteryConfig = parseLotteryConfig(base.configJson)
+  }
   return base
 }
 
@@ -926,6 +942,55 @@ async function createDiceCampaign(userId: string, payload: CreateDiceCampaignPay
   return campaignRowAfterCreate(campaignId)
 }
 
+async function createLotteryCampaign(userId: string, payload: CreateLotteryCampaignPayload) {
+  validateLotteryConfig(payload.lotteryConfig)
+
+  const prizes = payload.lotteryConfig.prizes.filter(p => p.reward.trim())
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('lottery')
+  const configJson = serializeLotteryConfig(payload.lotteryConfig)
+
+  const statements = [
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'lottery', 'active', ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        LOTTERY_UNLIMITED_USER_CAP, LOTTERY_UNLIMITED_USER_CAP,
+        prizes.length, configJson, pin, pinExpires,
+      ],
+    },
+    ...prizes.map((prize, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        prize.id ?? nanoid(),
+        campaignId,
+        prize.reward.trim(),
+        prize.name.trim(),
+        prize.icon ?? (prize.tier === 'jackpot' ? '👑' : '🎁'),
+        i,
+        prize.tier,
+        payload.lotteryConfig.redeemExpiryMode,
+        payload.lotteryConfig.redeemExpiryMode === 'fixed' ? (payload.lotteryConfig.redeemFixedDate ?? null) : null,
+        payload.lotteryConfig.redeemExpiryMode === 'relative' ? (payload.lotteryConfig.redeemRelativeAmount ?? 7) : null,
+        payload.lotteryConfig.redeemExpiryMode === 'relative' ? (payload.lotteryConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+
+  await db.batch(statements)
+  return campaignRowAfterCreate(campaignId)
+}
+
 async function createStampCampaign(userId: string, payload: CreateStampCampaignPayload) {
   validateStampConfig(payload.stampConfig)
 
@@ -1051,6 +1116,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     created = await createSpinCampaign(userId, payload)
   } else if (payload.mechanic === 'dice') {
     created = await createDiceCampaign(userId, payload)
+  } else if (payload.mechanic === 'lottery') {
+    created = await createLotteryCampaign(userId, payload)
   } else {
     created = await createShakeCampaign(userId, payload)
   }
@@ -1124,6 +1191,8 @@ export async function updateCampaign(
     updated = await updateSpinCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'dice') {
     updated = await updateDiceCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'lottery') {
+    updated = await updateLotteryCampaign(userId, existing, payload)
   } else {
     updated = await updateShakeCampaign(userId, existing, payload)
   }
@@ -1536,6 +1605,85 @@ async function updateDiceCampaign(
 
   if (payload.diceConfig) {
     await replaceDiceRewards(existing.id, payload.diceConfig.outcomes)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceLotteryRewards(campaignId: string, config: z.infer<typeof lotteryConfigSchema>) {
+  const prizes = config.prizes.filter(p => p.reward.trim())
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const statements = prizes.map((prize, i) => ({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      prize.id ?? nanoid(),
+      campaignId,
+      prize.reward.trim(),
+      prize.name.trim(),
+      prize.icon ?? (prize.tier === 'jackpot' ? '👑' : '🎁'),
+      i,
+      prize.tier,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 7) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  }))
+  if (statements.length > 0) await db.batch(statements)
+}
+
+async function updateLotteryCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+  const currentConfig = parseLotteryConfig(existing.configJson)
+  if (currentConfig?.drawCompleted) throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.lotteryConfig) {
+    validateLotteryConfig(payload.lotteryConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.lotteryConfig) {
+    fields.push('config_json = ?', 'overall_winners = ?')
+    args.push(
+      serializeLotteryConfig(payload.lotteryConfig),
+      payload.lotteryConfig.prizes.filter(p => p.reward.trim()).length,
+    )
+  }
+
+  if (fields.length === 0 && !payload.lotteryConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.lotteryConfig) {
+    await replaceLotteryRewards(existing.id, payload.lotteryConfig)
   }
 
   return getCampaignForBusiness(userId, existing.id)
@@ -2119,6 +2267,45 @@ export async function getPublicCampaign(campaignId: string) {
     }
   }
 
+  if (campaign.mechanic === 'lottery') {
+    const lotteryConfig = parseLotteryConfig(campaign.configJson)
+    if (!lotteryConfig) throw new Error('INVALID_LOTTERY_CONFIG')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    const { isLotteryCampaignActive } = await import('./lottery-service.js')
+    const active = isLotteryCampaignActive(
+      campaign.status,
+      campaign.startDate,
+      campaign.endDate,
+      startTime,
+      endTime,
+      Boolean(lotteryConfig.drawCompleted),
+    )
+    if (!active) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      drawDate: campaign.endDate,
+      currentUsers: campaign.currentUsers,
+      lotteryConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+        tier: r.rewardTier,
+      })),
+    }
+  }
+
   if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
   const startTime = (row.start_time as string) ?? '00:00'
   const endTime = (row.end_time as string) ?? '23:59'
@@ -2576,9 +2763,12 @@ export async function listCustomerRewards(customerId: string) {
   const result = await db.execute({
     sql: `SELECT cr.*,
                  COALESCE(c.name, 'Rewards') as campaign_name,
-                 COALESCE(c.mechanic, 'points_claim') as mechanic
+                 COALESCE(c.mechanic, 'points_claim') as mechanic,
+                 c.end_date AS draw_date,
+                 lt.ticket_number, lt.serial_code, lt.status AS ticket_status, lt.result_viewed_at
           FROM customer_rewards cr
           LEFT JOIN campaigns c ON c.id = cr.campaign_id
+          LEFT JOIN lottery_tickets lt ON lt.id = cr.play_id
           WHERE cr.customer_id = ?
           ORDER BY cr.earned_at DESC`,
     args: [customerId],
@@ -2592,12 +2782,22 @@ export async function listCustomerRewards(customerId: string) {
       status = 'expired'
       expiredIds.push(row.id as string)
     }
+    const mechanic = row.mechanic as string
+    const lottery = mechanic === 'lottery' || row.source_type === 'lottery_ticket'
+      ? {
+          ticketNumber: row.ticket_number != null ? Number(row.ticket_number) : null,
+          serialCode: (row.serial_code as string) ?? null,
+          drawDate: (row.draw_date as string) ?? null,
+          ticketStatus: (row.ticket_status as string) ?? null,
+          hasViewedResult: Boolean(row.result_viewed_at),
+        }
+      : undefined
     return {
       id: row.id as string,
       campaignId: row.campaign_id as string,
       businessId: (row.business_id as string) ?? null,
       campaignName: row.campaign_name as string,
-      mechanic: row.mechanic as string,
+      mechanic,
       reward: row.reward_name as string,
       icon: (row.icon as string) ?? '🎁',
       earnedAt: row.earned_at as string,
@@ -2606,6 +2806,7 @@ export async function listCustomerRewards(customerId: string) {
       redeemedAt: (row.redeemed_at as string) ?? undefined,
       code: row.redemption_code as string,
       redeemBefore: redeemExpiresAt,
+      ...(lottery ? { lottery } : {}),
     }
   })
 

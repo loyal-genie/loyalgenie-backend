@@ -13,6 +13,7 @@ import customerRoutes from './routes/customer.js'
 import uploadRoutes from './routes/uploads.js'
 import rewardsRoutes from './routes/rewards.js'
 import { startPinScheduler } from './services/pin-scheduler.js'
+import { startLotteryDrawScheduler } from './services/lottery-draw-scheduler.js'
 import { normalizeFrontendOrigin, parseFrontendOrigins } from './utils/frontend-url.js'
 
 dotenv.config()
@@ -155,10 +156,12 @@ async function start() {
   await verifyDatabaseConnection()
   await ensureColumnPatches()
   startPinScheduler()
+  startLotteryDrawScheduler()
   app.listen(PORT, () => {
     console.log(`LoyalGenie API running on http://localhost:${PORT}`)
     console.log(`Database: Supabase Postgres`)
     console.log(`PIN scheduler: active (server-side rotation for Realtime)`)
+    console.log(`Lottery draw scheduler: active`)
     console.log(`CORS allowed origins: ${allowedOrigins.join(', ')} (+ localhost:* in dev)`)
   })
 }

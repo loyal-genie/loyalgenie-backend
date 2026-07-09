@@ -14,7 +14,7 @@ export interface CustomerProfile {
 
 export interface CustomerNotification {
   id: string
-  type: 'profile_incomplete'
+  type: 'profile_incomplete' | 'lottery_draw' | 'lottery_win' | 'lottery_result'
   title: string
   body: string
   actionUrl: string
@@ -139,4 +139,29 @@ export function buildCustomerNotifications(profile: CustomerProfile): CustomerNo
     actionUrl: '/customer/profile/edit',
     createdAt: new Date().toISOString(),
   }]
+}
+
+export async function fetchCustomerNotifications(customerId: string): Promise<CustomerNotification[]> {
+  const profile = await getCustomerById(customerId)
+  const profileNotes = profile ? buildCustomerNotifications(profile) : []
+
+  const result = await db.execute({
+    sql: `SELECT id, type, title, body, action_url, created_at
+          FROM customer_notifications
+          WHERE customer_id = ? AND read_at IS NULL
+          ORDER BY created_at DESC
+          LIMIT 50`,
+    args: [customerId],
+  })
+
+  const lotteryNotes: CustomerNotification[] = result.rows.map(row => ({
+    id: row.id as string,
+    type: row.type as CustomerNotification['type'],
+    title: row.title as string,
+    body: row.body as string,
+    actionUrl: (row.action_url as string) ?? '/customer/wallet',
+    createdAt: row.created_at as string,
+  }))
+
+  return [...lotteryNotes, ...profileNotes]
 }

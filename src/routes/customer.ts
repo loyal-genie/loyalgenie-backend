@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { requireCustomerAuth } from '../middleware/auth.js'
 import {
   buildCustomerNotifications,
+  fetchCustomerNotifications,
   getCustomerById,
   updateCustomerProfileFields,
 } from '../services/customer.js'
@@ -80,11 +81,7 @@ router.patch('/profile', requireCustomerAuth, async (req, res) => {
 
 router.get('/notifications', requireCustomerAuth, async (req, res) => {
   try {
-    const profile = await getCustomerById(req.user!.id)
-    if (!profile) {
-      return res.status(404).json({ error: 'Profile not found' })
-    }
-    const notifications = buildCustomerNotifications(profile)
+    const notifications = await fetchCustomerNotifications(req.user!.id)
     res.json({ success: true, data: { notifications, unreadCount: notifications.length } })
   } catch (err) {
     console.error('Get customer notifications error:', err)

@@ -17,6 +17,8 @@ import {
   parseCheckInConfig,
   fetchMilestoneRewardsBatch,
 } from './check-in-loyalty.js'
+import { parseLotteryConfig } from './lottery-campaign-schema.js'
+import { isLotteryCampaignActive } from './lottery-service.js'
 
 export interface BusinessCampaignStateItem {
   campaignId: string
@@ -57,10 +59,11 @@ export async function getBusinessCampaignStates(
   const shakeIds = rows.filter(r => r.mechanic === 'shake' || r.mechanic === 'spin' || r.mechanic === 'dice').map(r => r.id as string)
   const stampIds = rows.filter(r => r.mechanic === 'stamp').map(r => r.id as string)
   const loyaltyIds = rows.filter(r => r.mechanic === 'check-in-loyalty').map(r => r.id as string)
+  const lotteryIds = rows.filter(r => r.mechanic === 'lottery').map(r => r.id as string)
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
@@ -88,6 +91,12 @@ export async function getBusinessCampaignStates(
           sql: `SELECT campaign_id, reward_name, status FROM customer_rewards
                 WHERE customer_id = ? AND campaign_id IN (${loyaltyIds.map(() => '?').join(', ')})`,
           args: [customerId, ...loyaltyIds],
+        })
+      : Promise.resolve({ rows: [] }),
+    lotteryIds.length > 0
+      ? db.execute({
+          sql: `SELECT * FROM lottery_tickets WHERE customer_id = ? AND campaign_id IN (${lotteryIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...lotteryIds],
         })
       : Promise.resolve({ rows: [] }),
   ])
@@ -133,6 +142,10 @@ export async function getBusinessCampaignStates(
       loyaltyRedeemedMap.get(cid)!.add(row.reward_name as string)
     }
   }
+
+  const lotteryTicketMap = new Map(
+    lotteryTicketsResult.rows.map(r => [r.campaign_id as string, r as Record<string, unknown>]),
+  )
 
   const items: BusinessCampaignStateItem[] = []
 
@@ -278,6 +291,41 @@ export async function getBusinessCampaignStates(
           campaignName: campaign.name,
           businessId: campaign.businessId,
           businessName,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'lottery') {
+      const config = parseLotteryConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const ticket = lotteryTicketMap.get(campaignId)
+      const active = isLotteryCampaignActive(
+        campaign.status,
+        campaign.startDate,
+        campaign.endDate,
+        campaign.startTime,
+        campaign.endTime,
+        Boolean(config.drawCompleted),
+      )
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'lottery',
+          drawDate: campaign.endDate,
+          drawCompleted: Boolean(config.drawCompleted),
+          active,
+          canClaimTicket: active && !ticket,
+          hasTicket: Boolean(ticket),
+          ticketNumber: ticket ? Number(ticket.ticket_number) : null,
+          ticketStatus: (ticket?.status as string) ?? null,
+          totalTickets: stats.currentUsers,
+          prizeCount: config.prizes.length,
         },
       })
       continue

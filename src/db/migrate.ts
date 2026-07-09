@@ -232,6 +232,40 @@ CREATE INDEX IF NOT EXISTS idx_loyalty_cards_campaign ON loyalty_cards(campaign_
 CREATE INDEX IF NOT EXISTS idx_loyalty_cards_customer ON loyalty_cards(customer_id);
 `
 
+const LOTTERY_MIGRATIONS = `
+CREATE TABLE IF NOT EXISTS lottery_tickets (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  ticket_number INTEGER NOT NULL,
+  serial_code TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending_draw',
+  prize_reward_id TEXT,
+  claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  result_viewed_at TEXT,
+  UNIQUE(campaign_id, customer_id),
+  UNIQUE(campaign_id, ticket_number),
+  FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lottery_tickets_campaign ON lottery_tickets(campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_lottery_tickets_customer ON lottery_tickets(customer_id);
+
+CREATE TABLE IF NOT EXISTS customer_notifications (
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL,
+  campaign_id TEXT,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  action_url TEXT,
+  read_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_customer_notifications_customer ON customer_notifications(customer_id, read_at);
+`
+
 async function runOptional(sql: string) {
   try {
     await db.execute(sql)
@@ -248,6 +282,7 @@ export async function ensureColumnPatches(): Promise<void> {
   await runOptional('ALTER TABLE customer_users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 1')
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
   await runOptional('ALTER TABLE stamp_cards ADD COLUMN drop_triggers_json TEXT')
+  await db.executeMultiple(LOTTERY_MIGRATIONS)
 }
 
 export async function migrate() {
@@ -257,6 +292,7 @@ export async function migrate() {
   await db.executeMultiple(CAMPAIGN_MIGRATIONS)
   for (const sql of COLUMN_PATCHES_CAMPAIGNS) await runOptional(sql)
   await db.executeMultiple(STAMP_CARD_MIGRATIONS)
+  await db.executeMultiple(LOTTERY_MIGRATIONS)
   await migrateCustomerUsersForOtp()
   await migrateBusinessUsersForEmailOtp()
   await db.executeMultiple(`
