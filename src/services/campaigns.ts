@@ -1223,12 +1223,20 @@ export async function deleteCampaign(
   const row = owned.rows[0] as { id: string; name: string } | undefined
   if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
 
-  const [participations, gamePlays, customerRewards, stampCards, loyaltyCards] = await Promise.all([
+  const [participations, gamePlays, customerRewards, stampCards, loyaltyCards, lotteryTickets, notifications] = await Promise.all([
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM campaign_participations WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM game_plays WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM customer_rewards WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM stamp_cards WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM loyalty_cards WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM lottery_tickets WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM customer_notifications WHERE campaign_id = ?', args: [campaignId] }),
+  ])
+
+  // Delete lottery-related rows first
+  await Promise.all([
+    db.execute({ sql: 'DELETE FROM lottery_tickets WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'DELETE FROM customer_notifications WHERE campaign_id = ?', args: [campaignId] }),
   ])
 
   await db.execute({
