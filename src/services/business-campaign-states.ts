@@ -19,6 +19,8 @@ import {
 } from './check-in-loyalty.js'
 import { parseLotteryConfig } from './lottery-campaign-schema.js'
 import { isLotteryCampaignActive } from './lottery-service.js'
+import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
+import { isCampaignInWindow } from '../utils/campaign-dates.js'
 
 export interface BusinessCampaignStateItem {
   campaignId: string
@@ -326,6 +328,34 @@ export async function getBusinessCampaignStates(
           ticketStatus: (ticket?.status as string) ?? null,
           totalTickets: stats.currentUsers,
           prizeCount: config.prizes.length,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'buy-x-get-y') {
+      const config = parseBuyXGetYConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'buy-x-get-y',
+          active,
+          canClaim: active && claimed < campaign.userCap,
+          claimedCount: claimed,
+          userCap: campaign.userCap,
+          spotsRemaining: Math.max(0, campaign.userCap - claimed),
+          rewardLabel: formatBuyXGetYRewardLabel(config),
+          endDate: campaign.endDate,
         },
       })
       continue
