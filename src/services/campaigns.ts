@@ -97,6 +97,16 @@ import {
   type CreateFlashCampaignPayload,
 } from './flash-campaign-schema.js'
 import {
+  createComboCampaignSchema,
+  parseComboConfig,
+  comboConfigSchema,
+  validateComboConfig,
+  serializeComboConfig,
+  formatComboRewardLabel,
+  formatComboDescription,
+  type CreateComboCampaignPayload,
+} from './combo-campaign-schema.js'
+import {
   createGroupUnlockCampaignSchema,
   parseGroupUnlockConfig,
   groupUnlockConfigSchema,
@@ -179,6 +189,7 @@ export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createBuyXGetYCampaignSchema,
   createCouponCampaignSchema,
   createFlashCampaignSchema,
+  createComboCampaignSchema,
   createGroupUnlockCampaignSchema,
   createFriendCampaignSchema,
   createSpinCampaignSchema,
@@ -235,6 +246,7 @@ export const updateCampaignSchema = z.object({
   buyXGetYConfig: buyXGetYConfigSchema.optional(),
   couponConfig: couponConfigSchema.optional(),
   flashConfig: flashConfigSchema.optional(),
+  comboConfig: comboConfigSchema.optional(),
   groupUnlockConfig: groupUnlockConfigSchema.optional(),
   friendConfig: friendConfigSchema.optional(),
   startTime: timeSchema.optional(),
@@ -274,6 +286,7 @@ export interface UpdateCampaignPayload {
   buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema>
   couponConfig?: z.infer<typeof couponConfigSchema>
   flashConfig?: z.infer<typeof flashConfigSchema>
+  comboConfig?: z.infer<typeof comboConfigSchema>
   groupUnlockConfig?: z.infer<typeof groupUnlockConfigSchema>
   friendConfig?: z.infer<typeof friendConfigSchema>
   startTime?: string
@@ -377,6 +390,7 @@ export interface CampaignRow {
   buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema> | null
   couponConfig?: z.infer<typeof couponConfigSchema> | null
   flashConfig?: z.infer<typeof flashConfigSchema> | null
+  comboConfig?: z.infer<typeof comboConfigSchema> | null
   groupUnlockConfig?: z.infer<typeof groupUnlockConfigSchema> | null
   friendConfig?: z.infer<typeof friendConfigSchema> | null
 }
@@ -826,6 +840,9 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'flash') {
     base.flashConfig = parseFlashConfig(base.configJson)
   }
+  if (mechanic === 'combo') {
+    base.comboConfig = parseComboConfig(base.configJson)
+  }
   if (mechanic === 'groupunlock') {
     base.groupUnlockConfig = parseGroupUnlockConfig(base.configJson)
   }
@@ -1216,6 +1233,53 @@ async function createFlashCampaign(userId: string, payload: CreateFlashCampaignP
   return campaignRowAfterCreate(campaignId)
 }
 
+async function createComboCampaign(userId: string, payload: CreateComboCampaignPayload) {
+  validateComboConfig(payload.comboConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('combo')
+  const configJson = serializeComboConfig(payload.comboConfig)
+  const rewardLabel = formatComboRewardLabel(payload.comboConfig)
+  const rewardDescription = formatComboDescription(payload.comboConfig)
+  const userCap = payload.comboConfig.totalSpots
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'combo', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        userCap, userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '🎁', 100, 0, 'combo', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.comboConfig.redeemExpiryMode,
+        payload.comboConfig.redeemExpiryMode === 'fixed' ? (payload.comboConfig.redeemFixedDate ?? null) : null,
+        payload.comboConfig.redeemExpiryMode === 'relative' ? (payload.comboConfig.redeemRelativeAmount ?? 14) : null,
+        payload.comboConfig.redeemExpiryMode === 'relative' ? (payload.comboConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
 async function createGroupUnlockCampaign(userId: string, payload: CreateGroupUnlockCampaignPayload) {
   validateGroupUnlockConfig(payload.groupUnlockConfig)
 
@@ -1442,6 +1506,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     created = await createCouponCampaign(userId, payload)
   } else if (payload.mechanic === 'flash') {
     created = await createFlashCampaign(userId, payload)
+  } else if (payload.mechanic === 'combo') {
+    created = await createComboCampaign(userId, payload)
   } else if (payload.mechanic === 'groupunlock') {
     created = await createGroupUnlockCampaign(userId, payload)
   } else if (payload.mechanic === 'friend') {
@@ -1527,6 +1593,8 @@ export async function updateCampaign(
     updated = await updateCouponCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'flash') {
     updated = await updateFlashCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'combo') {
+    updated = await updateComboCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'groupunlock') {
     updated = await updateGroupUnlockCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'friend') {
@@ -2271,6 +2339,89 @@ async function updateFlashCampaign(
 
   if (payload.flashConfig) {
     await replaceFlashReward(existing.id, payload.flashConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceComboReward(campaignId: string, config: z.infer<typeof comboConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatComboRewardLabel(config)
+  const rewardDescription = formatComboDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '🎁', 100, 0, 'combo', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 14) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateComboCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.comboConfig) {
+    validateComboConfig(payload.comboConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  const userCap = payload.comboConfig?.totalSpots ?? payload.userCap
+  if (userCap !== undefined) {
+    if (userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(userCap, userCap)
+  }
+  if (payload.comboConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeComboConfig(payload.comboConfig))
+  }
+
+  if (fields.length === 0 && !payload.comboConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.comboConfig) {
+    await replaceComboReward(existing.id, payload.comboConfig)
   }
 
   return getCampaignForBusiness(userId, existing.id)
@@ -3139,6 +3290,36 @@ export async function getPublicCampaign(campaignId: string) {
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       flashConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'combo') {
+    const comboConfig = parseComboConfig(campaign.configJson)
+    if (!comboConfig) throw new Error('INVALID_COMBO_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      comboConfig,
       rewards: rewards.map(r => ({
         id: r.id,
         name: r.name,

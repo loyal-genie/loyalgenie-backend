@@ -22,6 +22,7 @@ import { isLotteryCampaignActive } from './lottery-service.js'
 import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
 import { parseCouponConfig, formatCouponRewardLabel } from './coupon-campaign-schema.js'
 import { parseFlashConfig, formatFlashRewardLabel } from './flash-campaign-schema.js'
+import { parseComboConfig, formatComboRewardLabel } from './combo-campaign-schema.js'
 import { parseGroupUnlockConfig, formatGroupUnlockRewardLabel } from './groupunlock-campaign-schema.js'
 import { parseFriendConfig, formatFriendRewardLabel } from './friend-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
@@ -443,6 +444,42 @@ export async function getBusinessCampaignStates(
           spotsRemaining: Math.max(0, totalSlots - claimed),
           rewardLabel: formatFlashRewardLabel(config),
           termsAndConditions: config.termsAndConditions,
+          endDate: campaign.endDate,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'combo') {
+      const config = parseComboConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const totalSpots = config.totalSpots
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'combo',
+          active,
+          canClaim: active && claimed < totalSpots,
+          claimedCount: claimed,
+          totalSpots,
+          spotsRemaining: Math.max(0, totalSpots - claimed),
+          rewardLabel: formatComboRewardLabel(config),
+          termsAndConditions: config.termsAndConditions,
+          variant: config.variant,
+          items: config.items,
+          paidItems: config.paidItems,
+          freeItems: config.freeItems,
+          originalPrice: config.originalPrice,
+          bundlePrice: config.bundlePrice,
           endDate: campaign.endDate,
         },
       })
