@@ -21,6 +21,7 @@ import { parseLotteryConfig } from './lottery-campaign-schema.js'
 import { isLotteryCampaignActive } from './lottery-service.js'
 import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
 import { parseCouponConfig, formatCouponRewardLabel } from './coupon-campaign-schema.js'
+import { parseFlashConfig, formatFlashRewardLabel } from './flash-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
 
 export interface BusinessCampaignStateItem {
@@ -385,6 +386,36 @@ export async function getBusinessCampaignStates(
           totalCoupons,
           spotsRemaining: Math.max(0, totalCoupons - claimed),
           rewardLabel: formatCouponRewardLabel(config),
+          termsAndConditions: config.termsAndConditions,
+          endDate: campaign.endDate,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'flash') {
+      const config = parseFlashConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const totalSlots = config.totalSlots
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'flash',
+          active,
+          canClaim: active && claimed < totalSlots,
+          claimedCount: claimed,
+          totalSlots,
+          spotsRemaining: Math.max(0, totalSlots - claimed),
+          rewardLabel: formatFlashRewardLabel(config),
           termsAndConditions: config.termsAndConditions,
           endDate: campaign.endDate,
         },

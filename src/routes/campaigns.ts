@@ -44,6 +44,10 @@ import {
   claimCouponReward,
   getCouponState,
 } from '../services/coupon-service.js'
+import {
+  claimFlashReward,
+  getFlashState,
+} from '../services/flash-service.js'
 
 const router = Router()
 
@@ -609,6 +613,47 @@ router.post('/:id/coupon/claim', requireCustomerAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to claim coupon' })
+  }
+})
+
+router.get('/:id/flash-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getFlashState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_FLASH_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get flash deal state' })
+  }
+})
+
+router.post('/:id/flash/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimFlashReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this flash deal' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All spots have been claimed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim flash deal' })
   }
 })
 
