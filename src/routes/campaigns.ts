@@ -36,6 +36,10 @@ import {
   getLotteryState,
   viewLotteryResult,
 } from '../services/lottery-service.js'
+import {
+  claimBuyXGetYReward,
+  getBuyXGetYState,
+} from '../services/buy-x-get-y-service.js'
 
 const router = Router()
 
@@ -171,6 +175,9 @@ router.post('/', requireAuth, async (req, res) => {
     if (message === 'INVALID_LOTTERY_CONFIG' || message === 'INVALID_LOTTERY_REDEEM') {
       return res.status(422).json({ error: 'Invalid lottery configuration — add jackpot and redeem-before settings' })
     }
+    if (message === 'INVALID_BUY_X_GET_Y_CONFIG' || message === 'INVALID_BUY_X_GET_Y_REDEEM') {
+      return res.status(422).json({ error: 'Invalid Buy X Get Y configuration — check trigger, reward, and redeem-before' })
+    }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL' || message === 'INVALID_LOYALTY_MILESTONES') {
       return res.status(422).json({ error: message === 'INVALID_LOYALTY_MILESTONES' ? 'Milestone point thresholds must be unique' : 'Invalid stamp card configuration' })
     }
@@ -266,6 +273,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
     if (message === 'INVALID_LOTTERY_CONFIG' || message === 'INVALID_LOTTERY_REDEEM') {
       return res.status(422).json({ error: 'Invalid lottery configuration — add jackpot and redeem-before settings' })
+    }
+    if (message === 'INVALID_BUY_X_GET_Y_CONFIG' || message === 'INVALID_BUY_X_GET_Y_REDEEM') {
+      return res.status(422).json({ error: 'Invalid Buy X Get Y configuration — check trigger, reward, and redeem-before' })
     }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL') {
       return res.status(422).json({ error: 'Invalid stamp card configuration' })
@@ -513,6 +523,47 @@ router.post('/customer/rewards/:id/view-lottery-result', requireCustomerAuth, as
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to update lottery result' })
+  }
+})
+
+router.get('/:id/buy-x-get-y-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getBuyXGetYState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_BUY_X_GET_Y_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get offer state' })
+  }
+})
+
+router.post('/:id/buy-x-get-y/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimBuyXGetYReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this offer' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All spots have been claimed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim reward' })
   }
 })
 
