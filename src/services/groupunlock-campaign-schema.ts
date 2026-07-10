@@ -10,7 +10,7 @@ const redeemFields = {
 }
 
 export const groupUnlockConfigSchema = z.object({
-  targetParticipants: z.number().int().min(2).max(2_000).default(20),
+  targetParticipants: z.number().int().min(1).max(2_000).default(20),
   rewardKind: z.enum(['flat', 'percent', 'item']),
   rewardValue: z.string().min(1),
   ...redeemFields,
@@ -60,7 +60,7 @@ export function formatGroupUnlockDescription(config: GroupUnlockConfig): string 
 }
 
 export function validateGroupUnlockConfig(config: GroupUnlockConfig): void {
-  if (config.targetParticipants < 2) throw new Error('INVALID_GROUPUNLOCK_CONFIG')
+  if (config.targetParticipants < 1) throw new Error('INVALID_GROUPUNLOCK_CONFIG')
   if (!config.rewardValue.trim()) throw new Error('INVALID_GROUPUNLOCK_CONFIG')
   if (config.rewardKind === 'percent') {
     const n = Number(config.rewardValue)

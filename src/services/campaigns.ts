@@ -3662,6 +3662,8 @@ export async function executeShakePlay(
 }
 
 export async function listCustomerRewards(customerId: string) {
+  const { maybeUnlockGroupRewards, getGroupUnlockProgress } = await import('./groupunlock-progress.js')
+
   const result = await db.execute({
     sql: `SELECT cr.*,
                  COALESCE(c.name, 'Rewards') as campaign_name,
@@ -3676,11 +3678,47 @@ export async function listCustomerRewards(customerId: string) {
     args: [customerId],
   })
 
+  // Unlock any group offers that have hit their target before we map statuses
+  const groupCampaignIds = new Set<string>()
+  for (const row of result.rows) {
+    if (row.mechanic === 'groupunlock' && row.campaign_id) {
+      groupCampaignIds.add(row.campaign_id as string)
+    }
+  }
+  for (const campaignId of groupCampaignIds) {
+    await maybeUnlockGroupRewards(campaignId)
+  }
+
+  // Re-fetch statuses after possible unlocks
+  const refreshed = groupCampaignIds.size > 0
+    ? await db.execute({
+        sql: `SELECT cr.*,
+                     COALESCE(c.name, 'Rewards') as campaign_name,
+                     COALESCE(c.mechanic, 'points_claim') as mechanic,
+                     c.end_date AS draw_date,
+                     lt.ticket_number, lt.serial_code, lt.status AS ticket_status, lt.result_viewed_at
+              FROM customer_rewards cr
+              LEFT JOIN campaigns c ON c.id = cr.campaign_id
+              LEFT JOIN lottery_tickets lt ON lt.id = cr.play_id
+              WHERE cr.customer_id = ?
+              ORDER BY cr.earned_at DESC`,
+        args: [customerId],
+      })
+    : result
+
+  const progressByCampaign = new Map<string, Awaited<ReturnType<typeof getGroupUnlockProgress>>>()
+  for (const campaignId of groupCampaignIds) {
+    progressByCampaign.set(campaignId, await getGroupUnlockProgress(campaignId))
+  }
+
   const expiredIds: string[] = []
-  const rows = result.rows.map(row => {
+  const rows = refreshed.rows.map(row => {
     const redeemExpiresAt = (row.redeem_expires_at as string) ?? null
     let status = row.status as string
-    if ((status === 'earned' || status === 'pending') && isCustomerRewardExpired(redeemExpiresAt)) {
+    if (
+      (status === 'earned' || status === 'pending' || status === 'group_pending')
+      && isCustomerRewardExpired(redeemExpiresAt)
+    ) {
       status = 'expired'
       expiredIds.push(row.id as string)
     }
@@ -3694,9 +3732,24 @@ export async function listCustomerRewards(customerId: string) {
           hasViewedResult: Boolean(row.result_viewed_at),
         }
       : undefined
+    const campaignId = row.campaign_id as string
+    const groupUnlock =
+      mechanic === 'groupunlock' || row.source_type === 'groupunlock'
+        ? (() => {
+            const progress = progressByCampaign.get(campaignId)
+            return progress
+              ? {
+                  targetParticipants: progress.targetParticipants,
+                  groupJoined: progress.groupJoined,
+                  peopleLeft: progress.peopleLeft,
+                  unlocked: progress.unlocked || status === 'earned' || status === 'pending' || status === 'redeemed',
+                }
+              : undefined
+          })()
+        : undefined
     return {
       id: row.id as string,
-      campaignId: row.campaign_id as string,
+      campaignId,
       businessId: (row.business_id as string) ?? null,
       campaignName: row.campaign_name as string,
       mechanic,
@@ -3709,13 +3762,14 @@ export async function listCustomerRewards(customerId: string) {
       code: row.redemption_code as string,
       redeemBefore: redeemExpiresAt,
       ...(lottery ? { lottery } : {}),
+      ...(groupUnlock ? { groupUnlock } : {}),
     }
   })
 
   if (expiredIds.length > 0) {
     const placeholders = expiredIds.map(() => '?').join(', ')
     await db.execute({
-      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id IN (${placeholders}) AND status IN ('earned', 'pending')`,
+      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id IN (${placeholders}) AND status IN ('earned', 'pending', 'group_pending')`,
       args: expiredIds,
     })
   }
@@ -3735,11 +3789,12 @@ export async function requestCustomerRedemption(customerId: string, rewardId: st
   if (status === 'redeemed') throw new Error('ALREADY_REDEEMED')
   if (status === 'expired' || isCustomerRewardExpired((row.redeem_expires_at as string) ?? null)) {
     await db.execute({
-      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id = ? AND status IN ('earned', 'pending')`,
+      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id = ? AND status IN ('earned', 'pending', 'group_pending')`,
       args: [rewardId],
     })
     throw new Error('REWARD_EXPIRED')
   }
+  if (status === 'group_pending') throw new Error('GROUP_NOT_UNLOCKED')
   if (status !== 'earned') throw new Error('INVALID_STATUS')
 
   await db.execute({

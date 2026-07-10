@@ -110,6 +110,9 @@ router.post('/customer/rewards/:id/request-redemption', requireCustomerAuth, asy
     if (message === 'REWARD_EXPIRED') {
       return res.status(410).json({ error: 'Reward has expired' })
     }
+    if (message === 'GROUP_NOT_UNLOCKED') {
+      return res.status(403).json({ error: 'Group offer is not unlocked yet — more people need to reserve' })
+    }
     console.error(err)
     res.status(500).json({ error: 'Failed to request redemption' })
   }

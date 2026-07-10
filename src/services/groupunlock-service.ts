@@ -9,6 +9,7 @@ import {
   formatGroupUnlockSentence,
   parseGroupUnlockConfig,
 } from './groupunlock-campaign-schema.js'
+import { maybeUnlockGroupRewards } from './groupunlock-progress.js'
 
 function generateRedemptionCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -50,7 +51,8 @@ export async function getGroupUnlockState(campaignId: string, customerId: string
 
   const claimedCount = await db.execute({
     sql: `SELECT COUNT(*) AS c FROM customer_rewards
-          WHERE campaign_id = ? AND source_type = 'groupunlock'`,
+          WHERE campaign_id = ? AND source_type = 'groupunlock'
+            AND status IN ('group_pending', 'earned', 'pending', 'redeemed')`,
     args: [campaignId],
   })
 
@@ -58,6 +60,21 @@ export async function getGroupUnlockState(campaignId: string, customerId: string
   const joined = Number(claimedCount.rows[0]?.c ?? 0)
   const rewardLabel = formatGroupUnlockRewardLabel(config)
   const unlocked = joined >= target
+
+  // Sync unlock if target already met (e.g. concurrent claims)
+  if (unlocked && reward?.status === 'group_pending') {
+    await maybeUnlockGroupRewards(campaignId)
+  }
+
+  const refreshedReward =
+    unlocked && reward?.status === 'group_pending'
+      ? (
+          await db.execute({
+            sql: `SELECT * FROM customer_rewards WHERE id = ?`,
+            args: [reward.id as string],
+          })
+        ).rows[0] as Record<string, unknown> | undefined
+      : reward
 
   return {
     campaignId,
@@ -70,18 +87,19 @@ export async function getGroupUnlockState(campaignId: string, customerId: string
     targetParticipants: target,
     spotsRemaining: Math.max(0, target - joined),
     groupJoined: joined,
+    peopleLeft: Math.max(0, target - joined),
     unlocked,
     offerSentence: formatGroupUnlockSentence(config),
     rewardLabel,
     rewardDescription: formatGroupUnlockDescription(config),
     rewardKind: config.rewardKind,
     endDate: row.end_date as string,
-    walletReward: reward
+    walletReward: refreshedReward
       ? {
-          id: reward.id as string,
-          status: reward.status as string,
-          code: reward.redemption_code as string,
-          redeemBefore: (reward.redeem_expires_at as string) ?? null,
+          id: refreshedReward.id as string,
+          status: refreshedReward.status as string,
+          code: refreshedReward.redemption_code as string,
+          redeemBefore: (refreshedReward.redeem_expires_at as string) ?? null,
         }
       : null,
     groupUnlockConfig: config,
@@ -120,7 +138,8 @@ export async function claimGroupUnlockReward(
 
   const claimedCount = await db.execute({
     sql: `SELECT COUNT(*) AS c FROM customer_rewards
-          WHERE campaign_id = ? AND source_type = 'groupunlock'`,
+          WHERE campaign_id = ? AND source_type = 'groupunlock'
+            AND status IN ('group_pending', 'earned', 'pending', 'redeemed')`,
     args: [campaignId],
   })
   if (Number(claimedCount.rows[0]?.c ?? 0) >= config.targetParticipants) {
@@ -147,6 +166,9 @@ export async function claimGroupUnlockReward(
   const today = todayInCampaignTz()
   const businessId = row.business_id as string
 
+  const previousJoined = Number(claimedCount.rows[0]?.c ?? 0)
+  const joinedAfter = previousJoined + 1
+
   await db.batch([
     {
       sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
@@ -156,7 +178,7 @@ export async function claimGroupUnlockReward(
     {
       sql: `INSERT INTO customer_rewards
             (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type, redeem_expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'earned', datetime('now'), ?, 'groupunlock', ?)`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'group_pending', datetime('now'), ?, 'groupunlock', ?)`,
       args: [
         rewardId,
         customerId,
@@ -180,6 +202,8 @@ export async function claimGroupUnlockReward(
     },
   ])
 
+  const unlocked = await maybeUnlockGroupRewards(campaignId)
+
   return {
     rewardId,
     reward: rewardLabel,
@@ -188,5 +212,9 @@ export async function claimGroupUnlockReward(
     code: redemptionCode,
     redeemBefore: redeemExpiresAt,
     icon: (campaignReward.icon as string) ?? '🤝',
+    unlocked,
+    groupJoined: joinedAfter,
+    targetParticipants: config.targetParticipants,
+    peopleLeft: Math.max(0, config.targetParticipants - joinedAfter),
   }
 }
