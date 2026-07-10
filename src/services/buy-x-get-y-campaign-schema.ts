@@ -13,7 +13,7 @@ export const buyXGetYConfigSchema = z.object({
   condition: z.enum(['quantity', 'spend']),
   buyQuantity: z.number().int().min(1).default(3),
   spendAmount: z.number().int().min(1).default(500),
-  rewardKind: z.enum(['flat', 'percent', 'item', 'points']),
+  rewardKind: z.enum(['flat', 'percent', 'item']),
   rewardValue: z.string().min(1),
   ...redeemFields,
 })
@@ -40,8 +40,6 @@ export function formatBuyXGetYRewardLabel(config: BuyXGetYConfig): string {
       return `₹${v} Off`
     case 'percent':
       return `${v}% Off`
-    case 'points':
-      return `${v} Points`
     case 'item':
     default:
       return v || 'Free Item'
