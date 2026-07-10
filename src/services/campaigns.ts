@@ -96,6 +96,16 @@ import {
   formatFlashDescription,
   type CreateFlashCampaignPayload,
 } from './flash-campaign-schema.js'
+import {
+  createFriendCampaignSchema,
+  parseFriendConfig,
+  friendConfigSchema,
+  validateFriendConfig,
+  serializeFriendConfig,
+  formatFriendRewardLabel,
+  formatFriendDescription,
+  type CreateFriendCampaignPayload,
+} from './friend-campaign-schema.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 import { TtlCache } from '../utils/ttl-cache.js'
 import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
@@ -159,6 +169,7 @@ export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createBuyXGetYCampaignSchema,
   createCouponCampaignSchema,
   createFlashCampaignSchema,
+  createFriendCampaignSchema,
   createSpinCampaignSchema,
   createDiceCampaignSchema,
   createStampCampaignSchema,
@@ -213,6 +224,7 @@ export const updateCampaignSchema = z.object({
   buyXGetYConfig: buyXGetYConfigSchema.optional(),
   couponConfig: couponConfigSchema.optional(),
   flashConfig: flashConfigSchema.optional(),
+  friendConfig: friendConfigSchema.optional(),
   startTime: timeSchema.optional(),
 })
 
@@ -250,6 +262,7 @@ export interface UpdateCampaignPayload {
   buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema>
   couponConfig?: z.infer<typeof couponConfigSchema>
   flashConfig?: z.infer<typeof flashConfigSchema>
+  friendConfig?: z.infer<typeof friendConfigSchema>
   startTime?: string
 }
 
@@ -351,6 +364,7 @@ export interface CampaignRow {
   buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema> | null
   couponConfig?: z.infer<typeof couponConfigSchema> | null
   flashConfig?: z.infer<typeof flashConfigSchema> | null
+  friendConfig?: z.infer<typeof friendConfigSchema> | null
 }
 
 /** Lightweight campaign read — no stats/rewards aggregation (hot paths). */
@@ -798,6 +812,9 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'flash') {
     base.flashConfig = parseFlashConfig(base.configJson)
   }
+  if (mechanic === 'friend') {
+    base.friendConfig = parseFriendConfig(base.configJson)
+  }
   return base
 }
 
@@ -1182,6 +1199,52 @@ async function createFlashCampaign(userId: string, payload: CreateFlashCampaignP
   return campaignRowAfterCreate(campaignId)
 }
 
+async function createFriendCampaign(userId: string, payload: CreateFriendCampaignPayload) {
+  validateFriendConfig(payload.friendConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('friend')
+  const configJson = serializeFriendConfig(payload.friendConfig)
+  const rewardLabel = formatFriendRewardLabel(payload.friendConfig)
+  const rewardDescription = formatFriendDescription(payload.friendConfig)
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'friend', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap, payload.userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '👫', 100, 0, 'friend', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.friendConfig.redeemExpiryMode,
+        payload.friendConfig.redeemExpiryMode === 'fixed' ? (payload.friendConfig.redeemFixedDate ?? null) : null,
+        payload.friendConfig.redeemExpiryMode === 'relative' ? (payload.friendConfig.redeemRelativeAmount ?? 7) : null,
+        payload.friendConfig.redeemExpiryMode === 'relative' ? (payload.friendConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
 async function createStampCampaign(userId: string, payload: CreateStampCampaignPayload) {
   validateStampConfig(payload.stampConfig)
 
@@ -1315,6 +1378,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     created = await createCouponCampaign(userId, payload)
   } else if (payload.mechanic === 'flash') {
     created = await createFlashCampaign(userId, payload)
+  } else if (payload.mechanic === 'friend') {
+    created = await createFriendCampaign(userId, payload)
   } else {
     created = await createShakeCampaign(userId, payload)
   }
@@ -1396,6 +1461,8 @@ export async function updateCampaign(
     updated = await updateCouponCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'flash') {
     updated = await updateFlashCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'friend') {
+    updated = await updateFriendCampaign(userId, existing, payload)
   } else {
     updated = await updateShakeCampaign(userId, existing, payload)
   }
@@ -2141,6 +2208,88 @@ async function updateFlashCampaign(
   return getCampaignForBusiness(userId, existing.id)
 }
 
+async function replaceFriendReward(campaignId: string, config: z.infer<typeof friendConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatFriendRewardLabel(config)
+  const rewardDescription = formatFriendDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '👫', 100, 0, 'friend', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 7) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateFriendCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.friendConfig) {
+    validateFriendConfig(payload.friendConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  if (payload.userCap !== undefined) {
+    if (payload.userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(payload.userCap, payload.userCap)
+  }
+  if (payload.friendConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeFriendConfig(payload.friendConfig))
+  }
+
+  if (fields.length === 0 && !payload.friendConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.friendConfig) {
+    await replaceFriendReward(existing.id, payload.friendConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
 async function updateStampCampaign(
   userId: string,
   existing: CampaignRow,
@@ -2839,6 +2988,36 @@ export async function getPublicCampaign(campaignId: string) {
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       flashConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'friend') {
+    const friendConfig = parseFriendConfig(campaign.configJson)
+    if (!friendConfig) throw new Error('INVALID_FRIEND_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      friendConfig,
       rewards: rewards.map(r => ({
         id: r.id,
         name: r.name,

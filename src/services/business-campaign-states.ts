@@ -22,6 +22,7 @@ import { isLotteryCampaignActive } from './lottery-service.js'
 import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
 import { parseCouponConfig, formatCouponRewardLabel } from './coupon-campaign-schema.js'
 import { parseFlashConfig, formatFlashRewardLabel } from './flash-campaign-schema.js'
+import { parseFriendConfig, formatFriendRewardLabel } from './friend-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
 
 export interface BusinessCampaignStateItem {
@@ -64,10 +65,11 @@ export async function getBusinessCampaignStates(
   const stampIds = rows.filter(r => r.mechanic === 'stamp').map(r => r.id as string)
   const loyaltyIds = rows.filter(r => r.mechanic === 'check-in-loyalty').map(r => r.id as string)
   const lotteryIds = rows.filter(r => r.mechanic === 'lottery').map(r => r.id as string)
+  const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, friendRewardsResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
@@ -101,6 +103,13 @@ export async function getBusinessCampaignStates(
       ? db.execute({
           sql: `SELECT * FROM lottery_tickets WHERE customer_id = ? AND campaign_id IN (${lotteryIds.map(() => '?').join(', ')})`,
           args: [customerId, ...lotteryIds],
+        })
+      : Promise.resolve({ rows: [] }),
+    friendIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id FROM customer_rewards
+                WHERE customer_id = ? AND source_type = 'friend' AND campaign_id IN (${friendIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...friendIds],
         })
       : Promise.resolve({ rows: [] }),
   ])
@@ -149,6 +158,10 @@ export async function getBusinessCampaignStates(
 
   const lotteryTicketMap = new Map(
     lotteryTicketsResult.rows.map(r => [r.campaign_id as string, r as Record<string, unknown>]),
+  )
+
+  const friendClaimedSet = new Set(
+    friendRewardsResult.rows.map(r => r.campaign_id as string),
   )
 
   const items: BusinessCampaignStateItem[] = []
@@ -417,6 +430,38 @@ export async function getBusinessCampaignStates(
           spotsRemaining: Math.max(0, totalSlots - claimed),
           rewardLabel: formatFlashRewardLabel(config),
           termsAndConditions: config.termsAndConditions,
+          endDate: campaign.endDate,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'friend') {
+      const config = parseFriendConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const userCap = campaign.userCap
+      const hasClaimed = friendClaimedSet.has(campaignId)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'friend',
+          active,
+          canClaim: active && !hasClaimed && claimed < userCap,
+          hasClaimed,
+          claimedCount: claimed,
+          userCap,
+          spotsRemaining: Math.max(0, userCap - claimed),
+          minFriends: config.minFriends,
+          rewardLabel: formatFriendRewardLabel(config),
           endDate: campaign.endDate,
         },
       })
