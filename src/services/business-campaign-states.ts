@@ -20,6 +20,7 @@ import {
 import { parseLotteryConfig } from './lottery-campaign-schema.js'
 import { isLotteryCampaignActive } from './lottery-service.js'
 import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
+import { parseCouponConfig, formatCouponRewardLabel } from './coupon-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
 
 export interface BusinessCampaignStateItem {
@@ -355,6 +356,36 @@ export async function getBusinessCampaignStates(
           userCap: campaign.userCap,
           spotsRemaining: Math.max(0, campaign.userCap - claimed),
           rewardLabel: formatBuyXGetYRewardLabel(config),
+          endDate: campaign.endDate,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'coupon') {
+      const config = parseCouponConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const totalCoupons = config.totalCoupons
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'coupon',
+          active,
+          canClaim: active && claimed < totalCoupons,
+          claimedCount: claimed,
+          totalCoupons,
+          spotsRemaining: Math.max(0, totalCoupons - claimed),
+          rewardLabel: formatCouponRewardLabel(config),
+          termsAndConditions: config.termsAndConditions,
           endDate: campaign.endDate,
         },
       })

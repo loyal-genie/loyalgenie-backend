@@ -76,6 +76,16 @@ import {
   formatBuyXGetYDescription,
   type CreateBuyXGetYCampaignPayload,
 } from './buy-x-get-y-campaign-schema.js'
+import {
+  createCouponCampaignSchema,
+  parseCouponConfig,
+  couponConfigSchema,
+  validateCouponConfig,
+  serializeCouponConfig,
+  formatCouponRewardLabel,
+  formatCouponDescription,
+  type CreateCouponCampaignPayload,
+} from './coupon-campaign-schema.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 import { TtlCache } from '../utils/ttl-cache.js'
 import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
@@ -137,6 +147,7 @@ export const createShakeCampaignSchema = z.object({
 export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createShakeCampaignSchema,
   createBuyXGetYCampaignSchema,
+  createCouponCampaignSchema,
   createSpinCampaignSchema,
   createDiceCampaignSchema,
   createStampCampaignSchema,
@@ -189,6 +200,7 @@ export const updateCampaignSchema = z.object({
   diceConfig: diceConfigSchema.optional(),
   lotteryConfig: lotteryConfigSchema.optional(),
   buyXGetYConfig: buyXGetYConfigSchema.optional(),
+  couponConfig: couponConfigSchema.optional(),
   startTime: timeSchema.optional(),
 })
 
@@ -224,6 +236,7 @@ export interface UpdateCampaignPayload {
   diceConfig?: z.infer<typeof diceConfigSchema>
   lotteryConfig?: z.infer<typeof lotteryConfigSchema>
   buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema>
+  couponConfig?: z.infer<typeof couponConfigSchema>
   startTime?: string
 }
 
@@ -323,6 +336,7 @@ export interface CampaignRow {
   diceConfig?: z.infer<typeof diceConfigSchema> | null
   lotteryConfig?: z.infer<typeof lotteryConfigSchema> | null
   buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema> | null
+  couponConfig?: z.infer<typeof couponConfigSchema> | null
 }
 
 /** Lightweight campaign read — no stats/rewards aggregation (hot paths). */
@@ -764,6 +778,9 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'buy-x-get-y') {
     base.buyXGetYConfig = parseBuyXGetYConfig(base.configJson)
   }
+  if (mechanic === 'coupon') {
+    base.couponConfig = parseCouponConfig(base.configJson)
+  }
   return base
 }
 
@@ -1054,6 +1071,53 @@ async function createBuyXGetYCampaign(userId: string, payload: CreateBuyXGetYCam
   return campaignRowAfterCreate(campaignId)
 }
 
+async function createCouponCampaign(userId: string, payload: CreateCouponCampaignPayload) {
+  validateCouponConfig(payload.couponConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('coupon')
+  const configJson = serializeCouponConfig(payload.couponConfig)
+  const rewardLabel = formatCouponRewardLabel(payload.couponConfig)
+  const rewardDescription = formatCouponDescription(payload.couponConfig)
+  const userCap = payload.couponConfig.totalCoupons
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'coupon', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        userCap, userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '🎫', 100, 0, 'coupon', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.couponConfig.redeemExpiryMode,
+        payload.couponConfig.redeemExpiryMode === 'fixed' ? (payload.couponConfig.redeemFixedDate ?? null) : null,
+        payload.couponConfig.redeemExpiryMode === 'relative' ? (payload.couponConfig.redeemRelativeAmount ?? 14) : null,
+        payload.couponConfig.redeemExpiryMode === 'relative' ? (payload.couponConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
 async function createStampCampaign(userId: string, payload: CreateStampCampaignPayload) {
   validateStampConfig(payload.stampConfig)
 
@@ -1183,6 +1247,8 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     created = await createLotteryCampaign(userId, payload)
   } else if (payload.mechanic === 'buy-x-get-y') {
     created = await createBuyXGetYCampaign(userId, payload)
+  } else if (payload.mechanic === 'coupon') {
+    created = await createCouponCampaign(userId, payload)
   } else {
     created = await createShakeCampaign(userId, payload)
   }
@@ -1260,6 +1326,8 @@ export async function updateCampaign(
     updated = await updateLotteryCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'buy-x-get-y') {
     updated = await updateBuyXGetYCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'coupon') {
+    updated = await updateCouponCampaign(userId, existing, payload)
   } else {
     updated = await updateShakeCampaign(userId, existing, payload)
   }
@@ -1834,6 +1902,89 @@ async function updateBuyXGetYCampaign(
 
   if (payload.buyXGetYConfig) {
     await replaceBuyXGetYReward(existing.id, payload.buyXGetYConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceCouponReward(campaignId: string, config: z.infer<typeof couponConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatCouponRewardLabel(config)
+  const rewardDescription = formatCouponDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '🎫', 100, 0, 'coupon', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 14) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateCouponCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.couponConfig) {
+    validateCouponConfig(payload.couponConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  const userCap = payload.couponConfig?.totalCoupons ?? payload.userCap
+  if (userCap !== undefined) {
+    if (userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(userCap, userCap)
+  }
+  if (payload.couponConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeCouponConfig(payload.couponConfig))
+  }
+
+  if (fields.length === 0 && !payload.couponConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.couponConfig) {
+    await replaceCouponReward(existing.id, payload.couponConfig)
   }
 
   return getCampaignForBusiness(userId, existing.id)
@@ -2477,6 +2628,36 @@ export async function getPublicCampaign(campaignId: string) {
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       buyXGetYConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'coupon') {
+    const couponConfig = parseCouponConfig(campaign.configJson)
+    if (!couponConfig) throw new Error('INVALID_COUPON_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      couponConfig,
       rewards: rewards.map(r => ({
         id: r.id,
         name: r.name,
