@@ -22,6 +22,7 @@ import { isLotteryCampaignActive } from './lottery-service.js'
 import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
 import { parseCouponConfig, formatCouponRewardLabel } from './coupon-campaign-schema.js'
 import { parseFlashConfig, formatFlashRewardLabel } from './flash-campaign-schema.js'
+import { parseGroupUnlockConfig, formatGroupUnlockRewardLabel } from './groupunlock-campaign-schema.js'
 import { parseFriendConfig, formatFriendRewardLabel } from './friend-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
 
@@ -66,10 +67,11 @@ export async function getBusinessCampaignStates(
   const loyaltyIds = rows.filter(r => r.mechanic === 'check-in-loyalty').map(r => r.id as string)
   const lotteryIds = rows.filter(r => r.mechanic === 'lottery').map(r => r.id as string)
   const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
+  const groupUnlockIds = rows.filter(r => r.mechanic === 'groupunlock').map(r => r.id as string)
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, friendRewardsResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, friendRewardsResult, groupUnlockRewardsResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
@@ -110,6 +112,13 @@ export async function getBusinessCampaignStates(
           sql: `SELECT campaign_id FROM customer_rewards
                 WHERE customer_id = ? AND source_type = 'friend' AND campaign_id IN (${friendIds.map(() => '?').join(', ')})`,
           args: [customerId, ...friendIds],
+        })
+      : Promise.resolve({ rows: [] }),
+    groupUnlockIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id FROM customer_rewards
+                WHERE customer_id = ? AND source_type = 'groupunlock' AND campaign_id IN (${groupUnlockIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...groupUnlockIds],
         })
       : Promise.resolve({ rows: [] }),
   ])
@@ -162,6 +171,10 @@ export async function getBusinessCampaignStates(
 
   const friendClaimedSet = new Set(
     friendRewardsResult.rows.map(r => r.campaign_id as string),
+  )
+
+  const groupUnlockClaimedSet = new Set(
+    groupUnlockRewardsResult.rows.map(r => r.campaign_id as string),
   )
 
   const items: BusinessCampaignStateItem[] = []
@@ -430,6 +443,40 @@ export async function getBusinessCampaignStates(
           spotsRemaining: Math.max(0, totalSlots - claimed),
           rewardLabel: formatFlashRewardLabel(config),
           termsAndConditions: config.termsAndConditions,
+          endDate: campaign.endDate,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'groupunlock') {
+      const config = parseGroupUnlockConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const groupJoined = stats.currentUsers
+      const targetParticipants = config.targetParticipants
+      const hasClaimed = groupUnlockClaimedSet.has(campaignId)
+      const unlocked = groupJoined >= targetParticipants
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'groupunlock',
+          active,
+          canClaim: active && !hasClaimed && groupJoined < targetParticipants,
+          hasClaimed,
+          groupJoined,
+          targetParticipants,
+          claimedCount: groupJoined,
+          spotsRemaining: Math.max(0, targetParticipants - groupJoined),
+          unlocked,
+          rewardLabel: formatGroupUnlockRewardLabel(config),
           endDate: campaign.endDate,
         },
       })

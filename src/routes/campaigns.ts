@@ -49,6 +49,10 @@ import {
   getFlashState,
 } from '../services/flash-service.js'
 import {
+  claimGroupUnlockReward,
+  getGroupUnlockState,
+} from '../services/groupunlock-service.js'
+import {
   claimFriendReward,
   getFriendState,
 } from '../services/friend-service.js'
@@ -658,6 +662,47 @@ router.post('/:id/flash/claim', requireCustomerAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to claim flash deal' })
+  }
+})
+
+router.get('/:id/groupunlock-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getGroupUnlockState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_GROUPUNLOCK_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get community offer state' })
+  }
+})
+
+router.post('/:id/groupunlock/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimGroupUnlockReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this community offer' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All spots have been reserved' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim community offer' })
   }
 })
 
