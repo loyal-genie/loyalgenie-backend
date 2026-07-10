@@ -1,6 +1,11 @@
 import { nanoid } from 'nanoid'
 import { db } from '../db/client.js'
-import { todayInCampaignTz, nowInCampaignTz } from '../utils/campaign-dates.js'
+import {
+  todayInCampaignTz,
+  nowInCampaignTz,
+  currentTimeInCampaignTz,
+  isCampaignInWindow,
+} from '../utils/campaign-dates.js'
 import { verifyPlaySession } from './campaigns.js'
 import {
   parseLotteryConfig,
@@ -30,21 +35,9 @@ export function isLotteryCampaignActive(
 ): boolean {
   if (drawCompleted || status === 'ended') return false
   if (status !== 'active') return false
-  const now = nowInCampaignTz()
-  const today = todayInCampaignTz()
-  if (today < startDate || today > endDate) return false
-  if (today === startDate || today === endDate) {
-    const [h, m] = (today === startDate ? startTime : endTime).split(':').map(Number)
-    const nowH = now.getHours()
-    const nowM = now.getMinutes()
-    if (today === startDate) {
-      if (nowH < h || (nowH === h && nowM < m)) return false
-    }
-    if (today === endDate) {
-      if (nowH > h || (nowH === h && nowM > m)) return false
-    }
-  }
-  return true
+  // Same-day campaigns must check BOTH start and end times in IST.
+  // Do not collapse to a single time — that incorrectly closes "Today" entries.
+  return isCampaignInWindow(startDate, endDate, startTime, endTime)
 }
 
 export function isLotteryDrawDue(
@@ -56,9 +49,7 @@ export function isLotteryDrawDue(
   const today = todayInCampaignTz()
   if (today < endDate) return false
   if (today > endDate) return true
-  const now = nowInCampaignTz()
-  const [h, m] = endTime.split(':').map(Number)
-  return now.getHours() > h || (now.getHours() === h && now.getMinutes() >= m)
+  return currentTimeInCampaignTz() >= endTime
 }
 
 async function getCampaignRow(campaignId: string) {
