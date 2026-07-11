@@ -68,7 +68,7 @@ const router = Router()
 router.get('/public/businesses', async (_req, res) => {
   try {
     const businesses = await listBusinessesWithActiveCampaigns()
-    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120')
+    res.set('Cache-Control', 'public, max-age=0, must-revalidate')
     res.json({ success: true, data: businesses })
   } catch (err) {
     console.error(err)
