@@ -51,8 +51,19 @@ export async function getBusinessCampaignStates(
   const today = todayInCampaignTz()
   const result = await db.execute({
     sql: `SELECT * FROM campaigns
-          WHERE business_id = ? AND status = 'active' AND start_date <= ?`,
-    args: [businessId, today],
+          WHERE business_id = ?
+            AND start_date <= ?
+            AND (
+              status = 'active'
+              OR (
+                mechanic = 'lottery'
+                AND status = 'ended'
+                AND id IN (
+                  SELECT DISTINCT campaign_id FROM lottery_tickets WHERE customer_id = ?
+                )
+              )
+            )`,
+    args: [businessId, today, customerId],
   })
   const rows = result.rows as Record<string, unknown>[]
   if (rows.length === 0) return []
@@ -145,9 +156,13 @@ export async function getBusinessCampaignStates(
     }
   }
 
-  const lotteryTicketMap = new Map(
-    lotteryTicketsResult.rows.map(r => [r.campaign_id as string, r as Record<string, unknown>]),
-  )
+  const lotteryTicketsByCampaign = new Map<string, Record<string, unknown>[]>()
+  for (const r of lotteryTicketsResult.rows) {
+    const cid = r.campaign_id as string
+    const list = lotteryTicketsByCampaign.get(cid) ?? []
+    list.push(r as Record<string, unknown>)
+    lotteryTicketsByCampaign.set(cid, list)
+  }
 
   const items: BusinessCampaignStateItem[] = []
 
@@ -304,7 +319,8 @@ export async function getBusinessCampaignStates(
         items.push({ campaignId, mechanic, state: null })
         continue
       }
-      const ticket = lotteryTicketMap.get(campaignId)
+      const customerTickets = lotteryTicketsByCampaign.get(campaignId) ?? []
+      const latestTicket = customerTickets[customerTickets.length - 1]
       const active = isLotteryCampaignActive(
         campaign.status,
         campaign.startDate,
@@ -313,6 +329,13 @@ export async function getBusinessCampaignStates(
         campaign.endTime,
         Boolean(config.drawCompleted),
       )
+      const playsPerDay = Math.max(1, campaign.playsPerDay)
+      const participation = partMap.get(campaignId)
+      const lastPlayDate = (participation?.last_play_date as string) ?? ''
+      const playsUsedToday = lastPlayDate === today
+        ? Number(participation?.plays_today ?? 0)
+        : 0
+      const playsRemaining = Math.max(0, playsPerDay - playsUsedToday)
       items.push({
         campaignId,
         mechanic,
@@ -322,10 +345,14 @@ export async function getBusinessCampaignStates(
           drawDate: campaign.endDate,
           drawCompleted: Boolean(config.drawCompleted),
           active,
-          canClaimTicket: active && !ticket,
-          hasTicket: Boolean(ticket),
-          ticketNumber: ticket ? Number(ticket.ticket_number) : null,
-          ticketStatus: (ticket?.status as string) ?? null,
+          canClaimTicket: active && playsRemaining > 0,
+          hasTicket: customerTickets.length > 0,
+          ticketCount: customerTickets.length,
+          playsPerDay,
+          playsUsedToday,
+          playsRemaining,
+          ticketNumber: latestTicket ? Number(latestTicket.ticket_number) : null,
+          ticketStatus: (latestTicket?.status as string) ?? null,
           totalTickets: stats.currentUsers,
           prizeCount: config.prizes.length,
         },

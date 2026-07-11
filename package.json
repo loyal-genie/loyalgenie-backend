@@ -38,6 +38,7 @@
   "test:customer:live": "tsx scripts/test-customer-live-e2e.ts",
   "test:redeem-expiry": "tsx scripts/test-redeem-expiry.ts",
   "test:lottery:e2e": "tsx scripts/test-lottery-e2e.ts",
+  "test:lottery:new-flow": "tsx scripts/test-lottery-new-flow-e2e.ts",
   "test:lottery:draw": "tsx scripts/trigger-lottery-draw.ts",
   "test:lottery:same-day": "tsx scripts/test-lottery-same-day-window.ts"
   },

@@ -243,13 +243,13 @@ CREATE TABLE IF NOT EXISTS lottery_tickets (
   prize_reward_id TEXT,
   claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
   result_viewed_at TEXT,
-  UNIQUE(campaign_id, customer_id),
   UNIQUE(campaign_id, ticket_number),
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_lottery_tickets_campaign ON lottery_tickets(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_lottery_tickets_customer ON lottery_tickets(customer_id);
+CREATE INDEX IF NOT EXISTS idx_lottery_tickets_campaign_customer ON lottery_tickets(campaign_id, customer_id);
 
 CREATE TABLE IF NOT EXISTS customer_notifications (
   id TEXT PRIMARY KEY,
@@ -283,6 +283,7 @@ export async function ensureColumnPatches(): Promise<void> {
   await runOptional('ALTER TABLE customer_rewards ADD COLUMN requested_at TEXT')
   await runOptional('ALTER TABLE stamp_cards ADD COLUMN drop_triggers_json TEXT')
   await db.executeMultiple(LOTTERY_MIGRATIONS)
+  await migrateLotteryMultiTicket()
 }
 
 export async function migrate() {
@@ -310,7 +311,84 @@ export async function migrate() {
   await migrateRewardRedemptionStatuses()
   await migrateShakeWinRateToPlayerBased()
   await migrateShakeWinnerCaps()
+  await migrateLotteryMultiTicket()
   console.log('Database migrations applied.')
+}
+
+/**
+ * Allow multiple lottery tickets per customer (plays/day), and stop parking
+ * pending tickets in the wallet — only wins move to wallet after claim.
+ */
+async function migrateLotteryMultiTicket() {
+  await runOptional(`CREATE TABLE IF NOT EXISTS schema_patches (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`)
+  const applied = await db.execute({
+    sql: 'SELECT 1 FROM schema_patches WHERE id = ?',
+    args: ['lottery_multi_ticket_2026_07'],
+  })
+  if (applied.rows.length > 0) return
+
+  // Drop UNIQUE(campaign_id, customer_id) if present (constraint or unique index).
+  await db.execute(`
+    DO $patch$
+    DECLARE
+      r RECORD;
+    BEGIN
+      FOR r IN
+        SELECT c.conname AS name, 'constraint' AS kind
+        FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'lottery_tickets'
+          AND n.nspname = current_schema()
+          AND c.contype = 'u'
+          AND pg_get_constraintdef(c.oid) LIKE '%(campaign_id, customer_id)%'
+      LOOP
+        EXECUTE format('ALTER TABLE lottery_tickets DROP CONSTRAINT %I', r.name);
+      END LOOP;
+
+      FOR r IN
+        SELECT i.relname AS name, 'index' AS kind
+        FROM pg_index x
+        JOIN pg_class t ON t.oid = x.indrelid
+        JOIN pg_class i ON i.oid = x.indexrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a1 ON a1.attrelid = t.oid AND a1.attnum = x.indkey[0]
+        JOIN pg_attribute a2 ON a2.attrelid = t.oid AND a2.attnum = x.indkey[1]
+        WHERE t.relname = 'lottery_tickets'
+          AND n.nspname = current_schema()
+          AND x.indisunique
+          AND NOT x.indisprimary
+          AND x.indnkeyatts = 2
+          AND a1.attname = 'campaign_id'
+          AND a2.attname = 'customer_id'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_constraint c WHERE c.conindid = x.indexrelid
+          )
+      LOOP
+        EXECUTE format('DROP INDEX IF EXISTS %I', r.name);
+      END LOOP;
+    END
+    $patch$;
+  `)
+
+  await runOptional(
+    'CREATE INDEX IF NOT EXISTS idx_lottery_tickets_campaign_customer ON lottery_tickets(campaign_id, customer_id)',
+  )
+
+  // Hide legacy pending/lost lottery wallet cards — tickets live in Check Status now.
+  await db.execute(`
+    UPDATE customer_rewards
+    SET status = 'lottery_archived'
+    WHERE source_type = 'lottery_ticket' AND status IN ('lottery_pending', 'lottery_lost')
+  `)
+
+  await db.execute({
+    sql: 'INSERT INTO schema_patches (id) VALUES (?)',
+    args: ['lottery_multi_ticket_2026_07'],
+  })
 }
 
 /** Replace percentage-based win rate with explicit overall + daily winner caps. */
