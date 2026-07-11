@@ -79,6 +79,7 @@ export async function getGroupUnlockState(campaignId: string, customerId: string
   return {
     campaignId,
     campaignName: row.name as string,
+    businessId: row.business_id as string,
     businessName: row.business_name as string,
     active,
     canClaim: active && !reward && joined < target,

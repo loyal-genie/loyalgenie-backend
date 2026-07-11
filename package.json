@@ -37,6 +37,7 @@
   "test:pin:boundary": "tsx scripts/test-pin-boundary.ts",
   "test:customer:live": "tsx scripts/test-customer-live-e2e.ts",
   "test:redeem-expiry": "tsx scripts/test-redeem-expiry.ts",
+  "test:groupunlock:status": "tsx scripts/test-groupunlock-status-e2e.ts",
   "test:lottery:e2e": "tsx scripts/test-lottery-e2e.ts",
   "test:lottery:draw": "tsx scripts/trigger-lottery-draw.ts"
   },
