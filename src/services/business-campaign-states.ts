@@ -49,6 +49,23 @@ async function batchDailyNewUsers(campaignIds: string[], today: string): Promise
   return map
 }
 
+/** Users who played today (last_play_date), for card social proof. */
+async function batchPlayingToday(campaignIds: string[], today: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  if (campaignIds.length === 0) return map
+  const placeholders = campaignIds.map(() => '?').join(', ')
+  const result = await db.execute({
+    sql: `SELECT campaign_id, COUNT(*) AS c FROM campaign_participations
+          WHERE campaign_id IN (${placeholders}) AND last_play_date = ?
+          GROUP BY campaign_id`,
+    args: [...campaignIds, today],
+  })
+  for (const row of result.rows) {
+    map.set(row.campaign_id as string, Number(row.c ?? 0))
+  }
+  return map
+}
+
 export async function getBusinessCampaignStates(
   businessId: string,
   customerId: string,
@@ -56,8 +73,19 @@ export async function getBusinessCampaignStates(
   const today = todayInCampaignTz()
   const result = await db.execute({
     sql: `SELECT * FROM campaigns
-          WHERE business_id = ? AND status = 'active' AND start_date <= ?`,
-    args: [businessId, today],
+          WHERE business_id = ?
+            AND start_date <= ?
+            AND (
+              status = 'active'
+              OR (
+                mechanic = 'lottery'
+                AND status = 'ended'
+                AND id IN (
+                  SELECT DISTINCT campaign_id FROM lottery_tickets WHERE customer_id = ?
+                )
+              )
+            )`,
+    args: [businessId, today, customerId],
   })
   const rows = result.rows as Record<string, unknown>[]
   if (rows.length === 0) return []
@@ -67,18 +95,23 @@ export async function getBusinessCampaignStates(
   const stampIds = rows.filter(r => r.mechanic === 'stamp').map(r => r.id as string)
   const loyaltyIds = rows.filter(r => r.mechanic === 'check-in-loyalty').map(r => r.id as string)
   const lotteryIds = rows.filter(r => r.mechanic === 'lottery').map(r => r.id as string)
+  const couponIds = rows.filter(r => r.mechanic === 'coupon').map(r => r.id as string)
+  const flashIds = rows.filter(r => r.mechanic === 'flash').map(r => r.id as string)
   const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
   const groupUnlockIds = rows.filter(r => r.mechanic === 'groupunlock').map(r => r.id as string)
+  const claimOfferIds = [...couponIds, ...flashIds, ...friendIds]
+  const playingTodayIds = [...shakeIds, ...lotteryIds]
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, friendRewardsResult, groupUnlockRewardsResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, playingTodayMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult, groupUnlockRewardsResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
       args: [customerId, ...ids],
     }),
     batchDailyNewUsers(shakeIds, today),
+    batchPlayingToday(playingTodayIds, today),
     stampIds.length > 0
       ? db.execute({
           sql: `SELECT * FROM stamp_cards WHERE customer_id = ? AND campaign_id IN (${stampIds.map(() => '?').join(', ')})`,
@@ -108,11 +141,13 @@ export async function getBusinessCampaignStates(
           args: [customerId, ...lotteryIds],
         })
       : Promise.resolve({ rows: [] }),
-    friendIds.length > 0
+    claimOfferIds.length > 0
       ? db.execute({
-          sql: `SELECT campaign_id FROM customer_rewards
-                WHERE customer_id = ? AND source_type = 'friend' AND campaign_id IN (${friendIds.map(() => '?').join(', ')})`,
-          args: [customerId, ...friendIds],
+          sql: `SELECT campaign_id, source_type FROM customer_rewards
+                WHERE customer_id = ?
+                  AND source_type IN ('coupon', 'flash', 'friend')
+                  AND campaign_id IN (${claimOfferIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...claimOfferIds],
         })
       : Promise.resolve({ rows: [] }),
     groupUnlockIds.length > 0
@@ -166,13 +201,24 @@ export async function getBusinessCampaignStates(
     }
   }
 
-  const lotteryTicketMap = new Map(
-    lotteryTicketsResult.rows.map(r => [r.campaign_id as string, r as Record<string, unknown>]),
-  )
+  const lotteryTicketsByCampaign = new Map<string, Record<string, unknown>[]>()
+  for (const r of lotteryTicketsResult.rows) {
+    const cid = r.campaign_id as string
+    const list = lotteryTicketsByCampaign.get(cid) ?? []
+    list.push(r as Record<string, unknown>)
+    lotteryTicketsByCampaign.set(cid, list)
+  }
 
-  const friendClaimedSet = new Set(
-    friendRewardsResult.rows.map(r => r.campaign_id as string),
-  )
+  const couponClaimedSet = new Set<string>()
+  const flashClaimedSet = new Set<string>()
+  const friendClaimedSet = new Set<string>()
+  for (const r of claimOfferRewardsResult.rows) {
+    const cid = r.campaign_id as string
+    const source = r.source_type as string
+    if (source === 'coupon') couponClaimedSet.add(cid)
+    else if (source === 'flash') flashClaimedSet.add(cid)
+    else if (source === 'friend') friendClaimedSet.add(cid)
+  }
 
   const groupUnlockClaimedSet = new Set(
     groupUnlockRewardsResult.rows.map(r => r.campaign_id as string),
@@ -205,6 +251,7 @@ export async function getBusinessCampaignStates(
           blockReason: eligibility.blockReason,
           winRatePercent: campaign.winRatePercent,
           overallWinners: campaign.overallWinners,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
         },
       })
       continue
@@ -333,7 +380,8 @@ export async function getBusinessCampaignStates(
         items.push({ campaignId, mechanic, state: null })
         continue
       }
-      const ticket = lotteryTicketMap.get(campaignId)
+      const customerTickets = lotteryTicketsByCampaign.get(campaignId) ?? []
+      const latestTicket = customerTickets[customerTickets.length - 1]
       const active = isLotteryCampaignActive(
         campaign.status,
         campaign.startDate,
@@ -342,6 +390,13 @@ export async function getBusinessCampaignStates(
         campaign.endTime,
         Boolean(config.drawCompleted),
       )
+      const playsPerDay = Math.max(1, campaign.playsPerDay)
+      const participation = partMap.get(campaignId)
+      const lastPlayDate = (participation?.last_play_date as string) ?? ''
+      const playsUsedToday = lastPlayDate === today
+        ? Number(participation?.plays_today ?? 0)
+        : 0
+      const playsRemaining = Math.max(0, playsPerDay - playsUsedToday)
       items.push({
         campaignId,
         mechanic,
@@ -351,11 +406,16 @@ export async function getBusinessCampaignStates(
           drawDate: campaign.endDate,
           drawCompleted: Boolean(config.drawCompleted),
           active,
-          canClaimTicket: active && !ticket,
-          hasTicket: Boolean(ticket),
-          ticketNumber: ticket ? Number(ticket.ticket_number) : null,
-          ticketStatus: (ticket?.status as string) ?? null,
+          canClaimTicket: active && playsRemaining > 0,
+          hasTicket: customerTickets.length > 0,
+          ticketCount: customerTickets.length,
+          playsPerDay,
+          playsUsedToday,
+          playsRemaining,
+          ticketNumber: latestTicket ? Number(latestTicket.ticket_number) : null,
+          ticketStatus: (latestTicket?.status as string) ?? null,
           totalTickets: stats.currentUsers,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
           prizeCount: config.prizes.length,
         },
       })
@@ -401,6 +461,7 @@ export async function getBusinessCampaignStates(
         isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
       const claimed = stats.currentUsers
       const totalCoupons = config.totalCoupons
+      const hasClaimed = couponClaimedSet.has(campaignId)
       items.push({
         campaignId,
         mechanic,
@@ -408,7 +469,8 @@ export async function getBusinessCampaignStates(
           campaignId,
           mechanic: 'coupon',
           active,
-          canClaim: active && claimed < totalCoupons,
+          canClaim: active && !hasClaimed && claimed < totalCoupons,
+          hasClaimed,
           claimedCount: claimed,
           totalCoupons,
           spotsRemaining: Math.max(0, totalCoupons - claimed),
@@ -431,6 +493,7 @@ export async function getBusinessCampaignStates(
         isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
       const claimed = stats.currentUsers
       const totalSlots = config.totalSlots
+      const hasClaimed = flashClaimedSet.has(campaignId)
       items.push({
         campaignId,
         mechanic,
@@ -438,7 +501,8 @@ export async function getBusinessCampaignStates(
           campaignId,
           mechanic: 'flash',
           active,
-          canClaim: active && claimed < totalSlots,
+          canClaim: active && !hasClaimed && claimed < totalSlots,
+          hasClaimed,
           claimedCount: claimed,
           totalSlots,
           spotsRemaining: Math.max(0, totalSlots - claimed),

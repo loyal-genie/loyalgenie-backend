@@ -33,6 +33,7 @@ import {
 import { getBusinessCampaignStates } from '../services/business-campaign-states.js'
 import {
   claimLotteryTicket,
+  claimLotteryWinToWallet,
   getLotteryState,
   viewLotteryResult,
 } from '../services/lottery-service.js'
@@ -518,8 +519,8 @@ router.post('/:id/lottery/claim-ticket', requireCustomerAuth, async (req, res) =
     if (message === 'INVALID_PLAY_SESSION') {
       return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
     }
-    if (message === 'TICKET_ALREADY_CLAIMED') {
-      return res.status(403).json({ error: 'You already claimed your ticket for this draw' })
+    if (message === 'TICKET_ALREADY_CLAIMED' || message === 'NO_PLAYS_REMAINING') {
+      return res.status(403).json({ error: 'No ticket claims left today. Come back tomorrow or check status.' })
     }
     if (message === 'DRAW_ALREADY_COMPLETED') {
       return res.status(403).json({ error: 'Draw has already completed' })
@@ -529,6 +530,23 @@ router.post('/:id/lottery/claim-ticket', requireCustomerAuth, async (req, res) =
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to claim ticket' })
+  }
+})
+
+router.post('/lottery/tickets/:ticketId/claim-win', requireCustomerAuth, async (req, res) => {
+  try {
+    const result = await claimLotteryWinToWallet(req.user!.id, String(req.params.ticketId))
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_WIN_FAILED'
+    if (message === 'TICKET_NOT_FOUND') {
+      return res.status(404).json({ error: 'Ticket not found' })
+    }
+    if (message === 'TICKET_NOT_WON' || message === 'PRIZE_MISSING') {
+      return res.status(422).json({ error: 'This ticket cannot be claimed to wallet yet' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim win to wallet' })
   }
 })
 
