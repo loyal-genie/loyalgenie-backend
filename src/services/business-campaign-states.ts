@@ -76,11 +76,14 @@ export async function getBusinessCampaignStates(
   const stampIds = rows.filter(r => r.mechanic === 'stamp').map(r => r.id as string)
   const loyaltyIds = rows.filter(r => r.mechanic === 'check-in-loyalty').map(r => r.id as string)
   const lotteryIds = rows.filter(r => r.mechanic === 'lottery').map(r => r.id as string)
+  const couponIds = rows.filter(r => r.mechanic === 'coupon').map(r => r.id as string)
+  const flashIds = rows.filter(r => r.mechanic === 'flash').map(r => r.id as string)
   const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
+  const claimOfferIds = [...couponIds, ...flashIds, ...friendIds]
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, friendRewardsResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
@@ -116,11 +119,13 @@ export async function getBusinessCampaignStates(
           args: [customerId, ...lotteryIds],
         })
       : Promise.resolve({ rows: [] }),
-    friendIds.length > 0
+    claimOfferIds.length > 0
       ? db.execute({
-          sql: `SELECT campaign_id FROM customer_rewards
-                WHERE customer_id = ? AND source_type = 'friend' AND campaign_id IN (${friendIds.map(() => '?').join(', ')})`,
-          args: [customerId, ...friendIds],
+          sql: `SELECT campaign_id, source_type FROM customer_rewards
+                WHERE customer_id = ?
+                  AND source_type IN ('coupon', 'flash', 'friend')
+                  AND campaign_id IN (${claimOfferIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...claimOfferIds],
         })
       : Promise.resolve({ rows: [] }),
   ])
@@ -175,9 +180,16 @@ export async function getBusinessCampaignStates(
     lotteryTicketsByCampaign.set(cid, list)
   }
 
-  const friendClaimedSet = new Set(
-    friendRewardsResult.rows.map(r => r.campaign_id as string),
-  )
+  const couponClaimedSet = new Set<string>()
+  const flashClaimedSet = new Set<string>()
+  const friendClaimedSet = new Set<string>()
+  for (const r of claimOfferRewardsResult.rows) {
+    const cid = r.campaign_id as string
+    const source = r.source_type as string
+    if (source === 'coupon') couponClaimedSet.add(cid)
+    else if (source === 'flash') flashClaimedSet.add(cid)
+    else if (source === 'friend') friendClaimedSet.add(cid)
+  }
 
   const items: BusinessCampaignStateItem[] = []
 
@@ -414,6 +426,7 @@ export async function getBusinessCampaignStates(
         isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
       const claimed = stats.currentUsers
       const totalCoupons = config.totalCoupons
+      const hasClaimed = couponClaimedSet.has(campaignId)
       items.push({
         campaignId,
         mechanic,
@@ -421,7 +434,8 @@ export async function getBusinessCampaignStates(
           campaignId,
           mechanic: 'coupon',
           active,
-          canClaim: active && claimed < totalCoupons,
+          canClaim: active && !hasClaimed && claimed < totalCoupons,
+          hasClaimed,
           claimedCount: claimed,
           totalCoupons,
           spotsRemaining: Math.max(0, totalCoupons - claimed),
@@ -444,6 +458,7 @@ export async function getBusinessCampaignStates(
         isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
       const claimed = stats.currentUsers
       const totalSlots = config.totalSlots
+      const hasClaimed = flashClaimedSet.has(campaignId)
       items.push({
         campaignId,
         mechanic,
@@ -451,7 +466,8 @@ export async function getBusinessCampaignStates(
           campaignId,
           mechanic: 'flash',
           active,
-          canClaim: active && claimed < totalSlots,
+          canClaim: active && !hasClaimed && claimed < totalSlots,
+          hasClaimed,
           claimedCount: claimed,
           totalSlots,
           spotsRemaining: Math.max(0, totalSlots - claimed),
