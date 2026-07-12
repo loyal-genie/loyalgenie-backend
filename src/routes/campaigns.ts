@@ -49,6 +49,10 @@ import {
   claimFlashReward,
   getFlashState,
 } from '../services/flash-service.js'
+import {
+  claimFriendReward,
+  getFriendState,
+} from '../services/friend-service.js'
 
 const router = Router()
 
@@ -672,6 +676,47 @@ router.post('/:id/flash/claim', requireCustomerAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to claim flash deal' })
+  }
+})
+
+router.get('/:id/friend-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getFriendState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_FRIEND_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get bring a friend state' })
+  }
+})
+
+router.post('/:id/friend/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimFriendReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this offer' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All claims taken' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim bring a friend reward' })
   }
 })
 
