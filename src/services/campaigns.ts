@@ -2680,6 +2680,8 @@ export async function listBusinessesWithActiveCampaigns() {
       mechanic: c.mechanic as string,
       startDate: c.start_date as string,
       endDate: c.end_date as string,
+      startTime: (c.start_time as string) ?? '00:00',
+      endTime: (c.end_time as string) ?? '23:59',
       winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : winRate,
       overallWinners,
       userCap,
@@ -2693,7 +2695,8 @@ export async function listBusinessesWithActiveCampaigns() {
 
   const placeholders = businessIds.map(() => '?').join(', ')
   const campaignsResult = await db.execute({
-    sql: `SELECT id, business_id, name, mechanic, start_date, end_date, user_cap, per_day_user_limit,
+    sql: `SELECT id, business_id, name, mechanic, start_date, end_date, start_time, end_time,
+                 user_cap, per_day_user_limit,
                  win_rate_percent, plays_per_day, overall_winners,
                  claim_period_days, cap_filled_at, config_json
           FROM campaigns

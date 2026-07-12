@@ -47,6 +47,23 @@ async function batchDailyNewUsers(campaignIds: string[], today: string): Promise
   return map
 }
 
+/** Users who played today (last_play_date), for card social proof. */
+async function batchPlayingToday(campaignIds: string[], today: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  if (campaignIds.length === 0) return map
+  const placeholders = campaignIds.map(() => '?').join(', ')
+  const result = await db.execute({
+    sql: `SELECT campaign_id, COUNT(*) AS c FROM campaign_participations
+          WHERE campaign_id IN (${placeholders}) AND last_play_date = ?
+          GROUP BY campaign_id`,
+    args: [...campaignIds, today],
+  })
+  for (const row of result.rows) {
+    map.set(row.campaign_id as string, Number(row.c ?? 0))
+  }
+  return map
+}
+
 export async function getBusinessCampaignStates(
   businessId: string,
   customerId: string,
@@ -80,16 +97,18 @@ export async function getBusinessCampaignStates(
   const flashIds = rows.filter(r => r.mechanic === 'flash').map(r => r.id as string)
   const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
   const claimOfferIds = [...couponIds, ...flashIds, ...friendIds]
+  const playingTodayIds = [...shakeIds, ...lotteryIds]
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, playingTodayMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
       args: [customerId, ...ids],
     }),
     batchDailyNewUsers(shakeIds, today),
+    batchPlayingToday(playingTodayIds, today),
     stampIds.length > 0
       ? db.execute({
           sql: `SELECT * FROM stamp_cards WHERE customer_id = ? AND campaign_id IN (${stampIds.map(() => '?').join(', ')})`,
@@ -218,6 +237,7 @@ export async function getBusinessCampaignStates(
           blockReason: eligibility.blockReason,
           winRatePercent: campaign.winRatePercent,
           overallWinners: campaign.overallWinners,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
         },
       })
       continue
@@ -381,6 +401,7 @@ export async function getBusinessCampaignStates(
           ticketNumber: latestTicket ? Number(latestTicket.ticket_number) : null,
           ticketStatus: (latestTicket?.status as string) ?? null,
           totalTickets: stats.currentUsers,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
           prizeCount: config.prizes.length,
         },
       })
