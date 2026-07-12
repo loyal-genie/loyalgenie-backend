@@ -98,8 +98,9 @@ export async function getBusinessCampaignStates(
   const couponIds = rows.filter(r => r.mechanic === 'coupon').map(r => r.id as string)
   const flashIds = rows.filter(r => r.mechanic === 'flash').map(r => r.id as string)
   const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
+  const comboIds = rows.filter(r => r.mechanic === 'combo').map(r => r.id as string)
   const groupUnlockIds = rows.filter(r => r.mechanic === 'groupunlock').map(r => r.id as string)
-  const claimOfferIds = [...couponIds, ...flashIds, ...friendIds]
+  const claimOfferIds = [...couponIds, ...flashIds, ...friendIds, ...comboIds]
   const playingTodayIds = [...shakeIds, ...lotteryIds]
 
   const placeholders = ids.map(() => '?').join(', ')
@@ -145,7 +146,7 @@ export async function getBusinessCampaignStates(
       ? db.execute({
           sql: `SELECT campaign_id, source_type FROM customer_rewards
                 WHERE customer_id = ?
-                  AND source_type IN ('coupon', 'flash', 'friend')
+                  AND source_type IN ('coupon', 'flash', 'friend', 'combo')
                   AND campaign_id IN (${claimOfferIds.map(() => '?').join(', ')})`,
           args: [customerId, ...claimOfferIds],
         })
@@ -212,12 +213,14 @@ export async function getBusinessCampaignStates(
   const couponClaimedSet = new Set<string>()
   const flashClaimedSet = new Set<string>()
   const friendClaimedSet = new Set<string>()
+  const comboClaimedSet = new Set<string>()
   for (const r of claimOfferRewardsResult.rows) {
     const cid = r.campaign_id as string
     const source = r.source_type as string
     if (source === 'coupon') couponClaimedSet.add(cid)
     else if (source === 'flash') flashClaimedSet.add(cid)
     else if (source === 'friend') friendClaimedSet.add(cid)
+    else if (source === 'combo') comboClaimedSet.add(cid)
   }
 
   const groupUnlockClaimedSet = new Set(
@@ -525,6 +528,7 @@ export async function getBusinessCampaignStates(
         isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
       const claimed = stats.currentUsers
       const totalSpots = config.totalSpots
+      const hasClaimed = comboClaimedSet.has(campaignId)
       items.push({
         campaignId,
         mechanic,
@@ -532,7 +536,8 @@ export async function getBusinessCampaignStates(
           campaignId,
           mechanic: 'combo',
           active,
-          canClaim: active && claimed < totalSpots,
+          canClaim: active && !hasClaimed && claimed < totalSpots,
+          hasClaimed,
           claimedCount: claimed,
           totalSpots,
           spotsRemaining: Math.max(0, totalSpots - claimed),
