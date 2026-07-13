@@ -22,6 +22,8 @@ import { isLotteryCampaignActive } from './lottery-service.js'
 import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
 import { parseCouponConfig, formatCouponRewardLabel } from './coupon-campaign-schema.js'
 import { parseFlashConfig, formatFlashRewardLabel } from './flash-campaign-schema.js'
+import { parseComboConfig, formatComboRewardLabel } from './combo-campaign-schema.js'
+import { parseGroupUnlockConfig, formatGroupUnlockRewardLabel } from './groupunlock-campaign-schema.js'
 import { parseFriendConfig, formatFriendRewardLabel } from './friend-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
 
@@ -96,13 +98,15 @@ export async function getBusinessCampaignStates(
   const couponIds = rows.filter(r => r.mechanic === 'coupon').map(r => r.id as string)
   const flashIds = rows.filter(r => r.mechanic === 'flash').map(r => r.id as string)
   const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
+  const comboIds = rows.filter(r => r.mechanic === 'combo').map(r => r.id as string)
   const buyXGetYIds = rows.filter(r => r.mechanic === 'buy-x-get-y').map(r => r.id as string)
-  const claimOfferIds = [...couponIds, ...flashIds, ...friendIds, ...buyXGetYIds]
+  const groupUnlockIds = rows.filter(r => r.mechanic === 'groupunlock').map(r => r.id as string)
+  const claimOfferIds = [...couponIds, ...flashIds, ...friendIds, ...comboIds, ...buyXGetYIds]
   const playingTodayIds = [...shakeIds, ...lotteryIds]
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, playingTodayMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, playingTodayMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult, groupUnlockRewardsResult] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
@@ -143,9 +147,16 @@ export async function getBusinessCampaignStates(
       ? db.execute({
           sql: `SELECT campaign_id, source_type FROM customer_rewards
                 WHERE customer_id = ?
-                  AND source_type IN ('coupon', 'flash', 'friend', 'buy_x_get_y')
+                  AND source_type IN ('coupon', 'flash', 'friend', 'combo', 'buy_x_get_y')
                   AND campaign_id IN (${claimOfferIds.map(() => '?').join(', ')})`,
           args: [customerId, ...claimOfferIds],
+        })
+      : Promise.resolve({ rows: [] }),
+    groupUnlockIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id FROM customer_rewards
+                WHERE customer_id = ? AND source_type = 'groupunlock' AND campaign_id IN (${groupUnlockIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...groupUnlockIds],
         })
       : Promise.resolve({ rows: [] }),
   ])
@@ -203,6 +214,7 @@ export async function getBusinessCampaignStates(
   const couponClaimedSet = new Set<string>()
   const flashClaimedSet = new Set<string>()
   const friendClaimedSet = new Set<string>()
+  const comboClaimedSet = new Set<string>()
   const buyXGetYClaimedSet = new Set<string>()
   for (const r of claimOfferRewardsResult.rows) {
     const cid = r.campaign_id as string
@@ -210,8 +222,13 @@ export async function getBusinessCampaignStates(
     if (source === 'coupon') couponClaimedSet.add(cid)
     else if (source === 'flash') flashClaimedSet.add(cid)
     else if (source === 'friend') friendClaimedSet.add(cid)
+    else if (source === 'combo') comboClaimedSet.add(cid)
     else if (source === 'buy_x_get_y') buyXGetYClaimedSet.add(cid)
   }
+
+  const groupUnlockClaimedSet = new Set(
+    groupUnlockRewardsResult.rows.map(r => r.campaign_id as string),
+  )
 
   const items: BusinessCampaignStateItem[] = []
 
@@ -499,6 +516,78 @@ export async function getBusinessCampaignStates(
           spotsRemaining: Math.max(0, totalSlots - claimed),
           rewardLabel: formatFlashRewardLabel(config),
           termsAndConditions: config.termsAndConditions,
+          endDate: campaign.endDate,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'combo') {
+      const config = parseComboConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const totalSpots = config.totalSpots
+      const hasClaimed = comboClaimedSet.has(campaignId)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'combo',
+          active,
+          canClaim: active && !hasClaimed && claimed < totalSpots,
+          hasClaimed,
+          claimedCount: claimed,
+          totalSpots,
+          spotsRemaining: Math.max(0, totalSpots - claimed),
+          rewardLabel: formatComboRewardLabel(config),
+          termsAndConditions: config.termsAndConditions,
+          variant: config.variant,
+          items: config.items,
+          paidItems: config.paidItems,
+          freeItems: config.freeItems,
+          originalPrice: config.originalPrice,
+          bundlePrice: config.bundlePrice,
+          endDate: campaign.endDate,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'groupunlock') {
+      const config = parseGroupUnlockConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const groupJoined = stats.currentUsers
+      const targetParticipants = config.targetParticipants
+      const hasClaimed = groupUnlockClaimedSet.has(campaignId)
+      const unlocked = groupJoined >= targetParticipants
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'groupunlock',
+          active,
+          canClaim: active && !hasClaimed && groupJoined < targetParticipants,
+          hasClaimed,
+          groupJoined,
+          targetParticipants,
+          claimedCount: groupJoined,
+          spotsRemaining: Math.max(0, targetParticipants - groupJoined),
+          unlocked,
+          rewardLabel: formatGroupUnlockRewardLabel(config),
           endDate: campaign.endDate,
         },
       })
