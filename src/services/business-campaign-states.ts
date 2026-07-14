@@ -102,7 +102,7 @@ export async function getBusinessCampaignStates(
   const buyXGetYIds = rows.filter(r => r.mechanic === 'buy-x-get-y').map(r => r.id as string)
   const groupUnlockIds = rows.filter(r => r.mechanic === 'groupunlock').map(r => r.id as string)
   const claimOfferIds = [...couponIds, ...flashIds, ...friendIds, ...comboIds, ...buyXGetYIds]
-  const playingTodayIds = [...shakeIds, ...lotteryIds]
+  const playingTodayIds = [...shakeIds, ...lotteryIds, ...loyaltyIds]
 
   const placeholders = ids.map(() => '?').join(', ')
 
@@ -372,6 +372,7 @@ export async function getBusinessCampaignStates(
             : null,
           userCap: campaign.userCap,
           currentUsers: campaign.currentUsers,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
           campaignName: campaign.name,
           businessId: campaign.businessId,
           businessName,
