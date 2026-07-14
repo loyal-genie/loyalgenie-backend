@@ -25,7 +25,39 @@ import { parseFlashConfig, formatFlashRewardLabel } from './flash-campaign-schem
 import { parseComboConfig, formatComboRewardLabel } from './combo-campaign-schema.js'
 import { parseGroupUnlockConfig, formatGroupUnlockRewardLabel } from './groupunlock-campaign-schema.js'
 import { parseFriendConfig, formatFriendRewardLabel } from './friend-campaign-schema.js'
+import { parseSpinConfig } from './spin-campaign-schema.js'
+import { parseDiceConfig } from './dice-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
+import { computeRedeemExpiryDate } from '../utils/redeem-expiry.js'
+
+type RedeemableConfig = {
+  redeemExpiryMode?: 'fixed' | 'relative'
+  redeemFixedDate?: string | null
+  redeemRelativeAmount?: number | null
+  redeemRelativeUnit?: 'day' | 'week' | 'month' | null
+}
+
+function listingRedeemBefore(config: RedeemableConfig): string | null {
+  return computeRedeemExpiryDate(
+    config.redeemExpiryMode ?? 'relative',
+    config.redeemFixedDate ?? null,
+    config.redeemRelativeAmount ?? null,
+    config.redeemRelativeUnit ?? null,
+  )
+}
+
+function uniquePrizeLabels(labels: string[], limit = 3): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of labels) {
+    const label = raw.trim()
+    if (!label || seen.has(label)) continue
+    seen.add(label)
+    out.push(label)
+    if (out.length >= limit) break
+  }
+  return out
+}
 
 export interface BusinessCampaignStateItem {
   campaignId: string
@@ -106,7 +138,7 @@ export async function getBusinessCampaignStates(
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, playingTodayMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult, groupUnlockRewardsResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, playingTodayMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult, groupUnlockRewardsResult, shakeRewardRows] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
@@ -159,7 +191,27 @@ export async function getBusinessCampaignStates(
           args: [customerId, ...groupUnlockIds],
         })
       : Promise.resolve({ rows: [] }),
+    shakeIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id, name, icon FROM campaign_rewards
+                WHERE campaign_id IN (${shakeIds.map(() => '?').join(', ')})
+                ORDER BY campaign_id ASC, sort_order ASC`,
+          args: shakeIds,
+        })
+      : Promise.resolve({ rows: [] }),
   ])
+
+  const shakePrizesByCampaign = new Map<string, string[]>()
+  for (const row of shakeRewardRows.rows) {
+    const campaignId = row.campaign_id as string
+    const name = (row.name as string) ?? ''
+    const icon = ((row.icon as string) ?? '').trim()
+    const label = icon && !name.includes(icon) ? `${name} ${icon}`.trim() : name
+    if (!label) continue
+    const list = shakePrizesByCampaign.get(campaignId) ?? []
+    list.push(label)
+    shakePrizesByCampaign.set(campaignId, list)
+  }
 
   const stampExpireEntries = rows
     .filter(r => r.mechanic === 'stamp')
@@ -244,6 +296,32 @@ export async function getBusinessCampaignStates(
         totalUsers: stats.currentUsers,
         dailyNewUsers: dailyNewMap.get(campaignId) ?? 0,
       })
+      let possibleRewards: string[] = []
+      if (mechanic === 'shake') {
+        possibleRewards = uniquePrizeLabels(shakePrizesByCampaign.get(campaignId) ?? [])
+      } else if (mechanic === 'spin') {
+        const spinConfig = parseSpinConfig(campaign.configJson)
+        possibleRewards = uniquePrizeLabels(
+          (spinConfig?.segments ?? [])
+            .filter(s => s.isWin)
+            .map(s => {
+              const text = (s.reward || s.label || '').trim()
+              const icon = (s.icon ?? '').trim()
+              return icon && text && !text.includes(icon) ? `${text} ${icon}` : text
+            }),
+        )
+      } else {
+        const diceConfig = parseDiceConfig(campaign.configJson)
+        possibleRewards = uniquePrizeLabels(
+          (diceConfig?.outcomes ?? [])
+            .filter(o => o.isWin)
+            .map(o => {
+              const text = (o.reward ?? '').trim()
+              const icon = (o.icon ?? '').trim()
+              return icon && text && !text.includes(icon) ? `${text} ${icon}` : text
+            }),
+        )
+      }
       items.push({
         campaignId,
         mechanic,
@@ -258,6 +336,7 @@ export async function getBusinessCampaignStates(
           winRatePercent: campaign.winRatePercent,
           overallWinners: campaign.overallWinners,
           playingToday: playingTodayMap.get(campaignId) ?? 0,
+          possibleRewards,
         },
       })
       continue
@@ -454,6 +533,7 @@ export async function getBusinessCampaignStates(
           spotsRemaining: Math.max(0, campaign.userCap - claimed),
           rewardLabel: formatBuyXGetYRewardLabel(config),
           endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
         },
       })
       continue
@@ -486,6 +566,7 @@ export async function getBusinessCampaignStates(
           rewardLabel: formatCouponRewardLabel(config),
           termsAndConditions: config.termsAndConditions,
           endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
         },
       })
       continue
@@ -518,6 +599,7 @@ export async function getBusinessCampaignStates(
           rewardLabel: formatFlashRewardLabel(config),
           termsAndConditions: config.termsAndConditions,
           endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
         },
       })
       continue
@@ -556,6 +638,7 @@ export async function getBusinessCampaignStates(
           originalPrice: config.originalPrice,
           bundlePrice: config.bundlePrice,
           endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
         },
       })
       continue
@@ -590,6 +673,7 @@ export async function getBusinessCampaignStates(
           unlocked,
           rewardLabel: formatGroupUnlockRewardLabel(config),
           endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
         },
       })
       continue
@@ -622,6 +706,7 @@ export async function getBusinessCampaignStates(
           minFriends: config.minFriends,
           rewardLabel: formatFriendRewardLabel(config),
           endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
         },
       })
       continue
