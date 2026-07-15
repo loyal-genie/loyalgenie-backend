@@ -1,9 +1,10 @@
 import { db } from '../db/client.js'
-import { todayInCampaignTz, istDateSql } from '../utils/campaign-dates.js'
+import { todayInCampaignTz, istDateSql, isPastCampaignEndMoment } from '../utils/campaign-dates.js'
 import {
   fetchCampaignStatsBatch,
   checkEligibility,
   mapRowToCampaignLite,
+  autoEndExpiredCampaigns,
 } from './campaigns.js'
 import {
   parseStampCampaignMeta,
@@ -114,11 +115,22 @@ export async function getBusinessCampaignStates(
   businessId: string,
   customerId: string,
 ): Promise<BusinessCampaignStateItem[]> {
+  await autoEndExpiredCampaigns(businessId)
   const today = todayInCampaignTz()
   const result = await db.execute({
     sql: `SELECT * FROM campaigns
           WHERE business_id = ?
-            AND start_date <= ?
+            AND (
+              end_date >= ?
+              OR mechanic = 'stamp'
+              OR (
+                mechanic = 'lottery'
+                AND status = 'ended'
+                AND id IN (
+                  SELECT DISTINCT campaign_id FROM lottery_tickets WHERE customer_id = ?
+                )
+              )
+            )
             AND (
               status = 'active'
               OR (
@@ -129,9 +141,19 @@ export async function getBusinessCampaignStates(
                 )
               )
             )`,
-    args: [businessId, today, customerId],
+    args: [businessId, today, customerId, customerId],
   })
-  const rows = result.rows as Record<string, unknown>[]
+  // Drop cards after end_date + end_time (SQL only knows calendar end_date).
+  // Keep stamp claim-window rows and ended lottery tickets the customer already holds.
+  const rows = (result.rows as Record<string, unknown>[]).filter((r) => {
+    const mechanic = r.mechanic as string
+    if (mechanic === 'stamp') return true
+    if (mechanic === 'lottery' && (r.status as string) === 'ended') return true
+    return !isPastCampaignEndMoment(
+      r.end_date as string,
+      (r.end_time as string) ?? '23:59',
+    )
+  })
   if (rows.length === 0) return []
 
   const ids = rows.map(r => r.id as string)
@@ -457,7 +479,8 @@ export async function getBusinessCampaignStates(
           loyaltyPoints: points,
           totalCheckIns: Number(card?.total_check_ins ?? 0),
           pointsPerCheckIn: config.pointsPerCheckIn,
-          canCheckInToday: !checkedInToday && campaign.status === 'active',
+          canCheckInToday: !checkedInToday && campaign.status === 'active'
+            && today >= campaign.startDate && today <= campaign.endDate,
           checkedInToday,
           milestones: milestoneStates,
           nextMilestone: next

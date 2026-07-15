@@ -231,7 +231,8 @@ export async function getLoyaltyState(campaignId: string, customerId: string): P
     loyaltyPoints: points,
     totalCheckIns: card?.totalCheckIns ?? 0,
     pointsPerCheckIn: config.pointsPerCheckIn,
-    canCheckInToday: !checkedInToday && campaign.status === 'active',
+    canCheckInToday: !checkedInToday && campaign.status === 'active'
+      && today >= campaign.startDate && today <= campaign.endDate,
     checkedInToday,
     milestones: milestoneStates,
     nextMilestone: next

@@ -90,7 +90,7 @@ export function isCampaignInDateWindow(
 }
 
 /** Normalize to HH:MM for lexicographic compare (handles "9:00" and "09:00:00"). */
-function normalizeHhMm(time: string): string {
+export function normalizeHhMm(time: string): string {
   const raw = time.trim()
   const match = /^(\d{1,2}):(\d{2})/.exec(raw)
   if (!match) return raw.slice(0, 5)
@@ -115,12 +115,47 @@ export function formatClockAmPm(hhmm: string): string {
   return `${h12}:${String(m).padStart(2, '0')} ${suffix}`
 }
 
+/** e.g. "16-07" from YYYY-MM-DD */
+export function formatDdMm(isoDate: string): string {
+  const day = isoDate.slice(0, 10)
+  const [, mo, d] = day.split('-')
+  if (!mo || !d) return isoDate
+  return `${d}-${mo}`
+}
+
+/** Listing / eligibility copy when campaign has not started yet. */
+export function campaignLiveOnMessage(startDate: string, startTime = '00:00'): string {
+  const start = normalizeHhMm(startTime)
+  const dateLabel = formatDdMm(startDate)
+  if (isFullDayWindow(start, '23:59') || start === '00:00') {
+    return `Live on ${dateLabel}`
+  }
+  return `Live on ${dateLabel} · ${formatClockAmPm(start)}`
+}
+
 /** Customer-facing copy when outside the daily Active Hours window. */
 export function outsideActiveHoursMessage(startTime = '00:00', endTime = '23:59'): string {
   const start = normalizeHhMm(startTime)
   const end = normalizeHhMm(endTime)
   if (isFullDayWindow(start, end)) return 'Campaign is not running today'
   return `Today · Active Hours ${formatClockAmPm(start)}–${formatClockAmPm(end)}`
+}
+
+/**
+ * True when the campaign has not opened yet (future start calendar day,
+ * or start day before start_time). Mid-range outside Active Hours is false.
+ */
+export function isBeforeCampaignStart(
+  startDate: string,
+  startTime = '00:00',
+  now = nowInCampaignTz(),
+): boolean {
+  const today = todayInCampaignTz(now)
+  if (today < startDate) return true
+  if (today > startDate) return false
+  const start = normalizeHhMm(startTime)
+  if (start === '00:00') return false
+  return currentTimeInCampaignTz(now) < start
 }
 
 /** Date + optional IST time window (HH:MM). Defaults: 00:00 start, 23:59 end. */
@@ -150,6 +185,24 @@ export function isCampaignInWindow(
 
 export function isCampaignPastEnd(endDate: string, today = todayInCampaignTz()): boolean {
   return today > endDate
+}
+
+/**
+ * True when the campaign schedule is over:
+ * - calendar day after end_date, OR
+ * - on end_date after end_time (normalized HH:MM).
+ * Full-day end (23:59) typically removes the next calendar day, not at 23:59:01.
+ */
+export function isPastCampaignEndMoment(
+  endDate: string,
+  endTime = '23:59',
+  now = nowInCampaignTz(),
+): boolean {
+  const today = todayInCampaignTz(now)
+  if (today > endDate) return true
+  if (today < endDate) return false
+  const time = currentTimeInCampaignTz(now)
+  return time > normalizeHhMm(endTime)
 }
 
 /** Calendar date of a UTC timestamp column in Asia/Kolkata (Postgres). */

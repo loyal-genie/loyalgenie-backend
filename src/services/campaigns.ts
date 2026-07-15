@@ -9,8 +9,10 @@ import {
   istDateSql,
   nowInCampaignTz,
   isCampaignInWindow,
-  currentTimeInCampaignTz,
   outsideActiveHoursMessage,
+  campaignLiveOnMessage,
+  isPastCampaignEndMoment,
+  isBeforeCampaignStart,
 } from '../utils/campaign-dates.js'
 import {
   computeRedeemExpiryDate,
@@ -514,20 +516,47 @@ export function pinCycleSecondsForMechanic(_mechanic: string): number {
   return PIN_CYCLE_SECONDS
 }
 
-async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
+export async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
   const today = todayInCampaignTz()
+  const now = nowInCampaignTz()
+
   if (businessId) {
     await db.execute({
       sql: `UPDATE campaigns SET status = 'ended'
             WHERE business_id = ? AND status IN ('active', 'paused') AND end_date < ?`,
       args: [businessId, today],
     })
-    return
+  } else {
+    await db.execute({
+      sql: `UPDATE campaigns SET status = 'ended'
+            WHERE status IN ('active', 'paused') AND end_date < ?`,
+      args: [today],
+    })
   }
+
+  // Same calendar day, past end_time (e.g. ends 21:00 → remove after 21:00).
+  // Stamp uses claim-period rules — leave those for ensureCampaignNotPastEnd / stamp filters.
+  const dueResult = await db.execute({
+    sql: businessId
+      ? `SELECT id, end_time, mechanic FROM campaigns
+         WHERE business_id = ? AND status IN ('active', 'paused') AND end_date = ? AND mechanic != 'stamp'`
+      : `SELECT id, end_time, mechanic FROM campaigns
+         WHERE status IN ('active', 'paused') AND end_date = ? AND mechanic != 'stamp'`,
+    args: businessId ? [businessId, today] : [today],
+  })
+
+  const expiredIds: string[] = []
+  for (const row of dueResult.rows) {
+    const endTime = (row.end_time as string) ?? '23:59'
+    if (isPastCampaignEndMoment(today, endTime, now)) {
+      expiredIds.push(row.id as string)
+    }
+  }
+  if (expiredIds.length === 0) return
+  const placeholders = expiredIds.map(() => '?').join(', ')
   await db.execute({
-    sql: `UPDATE campaigns SET status = 'ended'
-          WHERE status IN ('active', 'paused') AND end_date < ?`,
-    args: [today],
+    sql: `UPDATE campaigns SET status = 'ended' WHERE id IN (${placeholders})`,
+    args: expiredIds,
   })
 }
 
@@ -557,9 +586,7 @@ async function ensureCampaignNotPastEnd(row: Record<string, unknown>): Promise<R
     return row
   }
 
-  const pastEndDate = today > endDate
-  const pastEndTime = today === endDate && currentTimeInCampaignTz(now) > endTime
-  if (pastEndDate || pastEndTime) {
+  if (isPastCampaignEndMoment(endDate, endTime, now)) {
     await db.execute({
       sql: `UPDATE campaigns SET status = 'ended' WHERE id = ?`,
       args: [row.id as string],
@@ -2945,7 +2972,10 @@ export async function listBusinessesWithActiveCampaigns() {
           INNER JOIN campaigns c ON c.business_id = b.id
           LEFT JOIN branches br ON br.business_id = b.id AND br.is_primary = 1
           WHERE c.status = 'active'
-            AND c.start_date <= ?
+            AND (
+              c.end_date >= ?
+              OR c.mechanic = 'stamp'
+            )
           ORDER BY b.name ASC`,
     args: [today],
   })
@@ -2956,20 +2986,25 @@ export async function listBusinessesWithActiveCampaigns() {
 
   function isCampaignRowVisible(c: Record<string, unknown>, day: string): boolean {
     const mechanic = c.mechanic as string
+    const startDate = c.start_date as string
+    const endDate = c.end_date as string
+    const endTime = (c.end_time as string) ?? '23:59'
     if (mechanic === 'stamp') {
+      // Upcoming stamp cards stay visible before enrollment opens.
+      if (day < startDate) return day <= endDate
       return isStampCampaignActive(
         'active',
-        c.start_date as string,
-        c.end_date as string,
+        startDate,
+        endDate,
         Number(c.claim_period_days ?? 30),
         (c.cap_filled_at as string) ?? null,
         day,
       )
     }
-    if (mechanic === 'check-in-loyalty') {
-      return day >= (c.start_date as string) && day <= (c.end_date as string)
-    }
-    return day <= (c.end_date as string)
+    // Hide as soon as end_date + end_time has passed.
+    if (isPastCampaignEndMoment(endDate, endTime)) return false
+    // Include not-yet-started campaigns through their schedule end.
+    return day <= endDate
   }
 
   function mapCampaignListItem(c: Record<string, unknown>) {
@@ -3003,7 +3038,11 @@ export async function listBusinessesWithActiveCampaigns() {
                  win_rate_percent, plays_per_day, overall_winners,
                  claim_period_days, cap_filled_at, config_json
           FROM campaigns
-          WHERE business_id IN (${placeholders}) AND status = 'active' AND start_date <= ?`,
+          WHERE business_id IN (${placeholders}) AND status = 'active'
+            AND (
+              end_date >= ?
+              OR mechanic = 'stamp'
+            )`,
     args: [...businessIds, today],
   })
 
@@ -3066,8 +3105,11 @@ export async function getPublicCampaign(campaignId: string) {
           WHERE c.id = ?`,
     args: [campaignId],
   })
-  const row = result.rows[0] as Record<string, unknown> | undefined
-  if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+  const rowRaw = result.rows[0] as Record<string, unknown> | undefined
+  if (!rowRaw) throw new Error('CAMPAIGN_NOT_FOUND')
+
+  // Flip status when end_date + end_time have passed (stamp uses claim deadline).
+  const row = await ensureCampaignNotPastEnd(rowRaw)
 
   const [statsMap, rewardsMap] = await Promise.all([
     fetchCampaignStatsBatch([campaignId]),
@@ -3104,6 +3146,7 @@ export async function getPublicCampaign(campaignId: string) {
   }
 
   if (campaign.mechanic === 'stamp') {
+    const upcoming = today < campaign.startDate && today <= campaign.endDate && campaign.status === 'active'
     const active = isStampCampaignActive(
       campaign.status,
       campaign.startDate,
@@ -3112,7 +3155,7 @@ export async function getPublicCampaign(campaignId: string) {
       campaign.capFilledAt,
       today,
     )
-    if (!active) throw new Error('CAMPAIGN_NOT_ACTIVE')
+    if (!upcoming && !active) throw new Error('CAMPAIGN_NOT_ACTIVE')
 
     const meta = parseStampCampaignMeta({
       config_json: campaign.configJson,
@@ -3128,6 +3171,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       claimPeriodDays: campaign.claimPeriodDays,
@@ -3146,7 +3191,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3161,6 +3207,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       checkInConfig,
@@ -3180,6 +3228,7 @@ export async function getPublicCampaign(campaignId: string) {
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
     const { isLotteryCampaignActive } = await import('./lottery-service.js')
+    const upcoming = today < campaign.startDate && today <= campaign.endDate && campaign.status === 'active'
     const active = isLotteryCampaignActive(
       campaign.status,
       campaign.startDate,
@@ -3188,7 +3237,7 @@ export async function getPublicCampaign(campaignId: string) {
       endTime,
       Boolean(lotteryConfig.drawCompleted),
     )
-    if (!active) {
+    if (!upcoming && !active) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3200,6 +3249,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       drawDate: campaign.endDate,
       currentUsers: campaign.currentUsers,
       lotteryConfig,
@@ -3219,7 +3270,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3231,6 +3283,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       buyXGetYConfig,
@@ -3249,7 +3303,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3261,6 +3316,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       couponConfig,
@@ -3279,7 +3336,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3291,6 +3349,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       flashConfig,
@@ -3309,7 +3369,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3321,6 +3382,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       comboConfig,
@@ -3339,7 +3402,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3351,6 +3415,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       groupUnlockConfig,
@@ -3369,7 +3435,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -3381,6 +3448,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       friendConfig,
@@ -3396,7 +3465,8 @@ export async function getPublicCampaign(campaignId: string) {
   if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
   const startTime = (row.start_time as string) ?? '00:00'
   const endTime = (row.end_time as string) ?? '23:59'
-  if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+  // Public fetch is allowed before start; play still gated by isCampaignInWindow / checkEligibility.
+  if (today > campaign.endDate) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
 
@@ -3415,6 +3485,8 @@ export async function getPublicCampaign(campaignId: string) {
     mechanic: campaign.mechanic,
     startDate: campaign.startDate,
     endDate: campaign.endDate,
+    startTime,
+    endTime,
     playsPerDay: campaign.playsPerDay,
     winRatePercent: campaign.winRatePercent,
     overallWinners: campaign.overallWinners,
@@ -3588,12 +3660,15 @@ export async function checkEligibility(
   const startTime = campaign.startTime ?? '00:00'
   const endTime = campaign.endTime ?? '23:59'
   if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    const notStartedYet = isBeforeCampaignStart(campaign.startDate, startTime)
     return {
       ...base,
       canPlay: false,
       playsRemaining: 0,
       playsUsedToday: 0,
-      message: outsideActiveHoursMessage(startTime, endTime),
+      message: notStartedYet
+        ? campaignLiveOnMessage(campaign.startDate, startTime)
+        : outsideActiveHoursMessage(startTime, endTime),
       isNewParticipant: false,
       blockReason: 'campaign_inactive',
     }
@@ -3752,7 +3827,7 @@ export async function executeShakePlay(
     throw new Error(
       msg === 'Campaign user cap reached' ? 'USER_CAP_REACHED' :
       msg.includes('Daily') ? 'DAILY_LIMIT_REACHED' :
-      msg === 'Campaign is not active' || msg === 'Campaign is not running today' || msg.startsWith('Today · Active Hours') ? 'CAMPAIGN_NOT_ACTIVE' :
+      msg === 'Campaign is not active' || msg === 'Campaign is not running today' || msg.startsWith('Today · Active Hours') || msg.startsWith('Live on ') ? 'CAMPAIGN_NOT_ACTIVE' :
       'NO_PLAYS_REMAINING',
     )
   }
