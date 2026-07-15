@@ -28,7 +28,7 @@ import { parseFriendConfig, formatFriendRewardLabel } from './friend-campaign-sc
 import { parseSpinConfig } from './spin-campaign-schema.js'
 import { parseDiceConfig } from './dice-campaign-schema.js'
 import { isCampaignInWindow } from '../utils/campaign-dates.js'
-import { computeRedeemExpiryDate } from '../utils/redeem-expiry.js'
+import { formatListingRedeemBefore } from '../utils/redeem-listing-label.js'
 
 type RedeemableConfig = {
   redeemExpiryMode?: 'fixed' | 'relative'
@@ -38,12 +38,7 @@ type RedeemableConfig = {
 }
 
 function listingRedeemBefore(config: RedeemableConfig): string | null {
-  return computeRedeemExpiryDate(
-    config.redeemExpiryMode ?? 'relative',
-    config.redeemFixedDate ?? null,
-    config.redeemRelativeAmount ?? null,
-    config.redeemRelativeUnit ?? null,
-  )
+  return formatListingRedeemBefore(config)
 }
 
 function uniquePrizeLabels(labels: string[], limit = 3): string[] {
