@@ -15,6 +15,7 @@ export const buyXGetYConfigSchema = z.object({
   spendAmount: z.number().int().min(1).default(500),
   rewardKind: z.enum(['flat', 'percent', 'item']),
   rewardValue: z.string().min(1),
+  termsAndConditions: z.string().default(''),
   ...redeemFields,
 })
 

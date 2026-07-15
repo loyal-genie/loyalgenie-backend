@@ -548,6 +548,7 @@ export async function getBusinessCampaignStates(
           rewardLabel: formatBuyXGetYRewardLabel(config),
           endDate: campaign.endDate,
           redeemBefore: listingRedeemBefore(config),
+          termsAndConditions: config.termsAndConditions,
         },
       })
       continue

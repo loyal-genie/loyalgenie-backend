@@ -76,6 +76,7 @@ export async function getBuyXGetYState(campaignId: string, customerId: string) {
     condition: config.condition,
     buyQuantity: config.buyQuantity,
     spendAmount: config.spendAmount,
+    termsAndConditions: config.termsAndConditions,
     endDate: row.end_date as string,
     walletReward: reward
       ? {
