@@ -115,18 +115,27 @@ export function formatClockAmPm(hhmm: string): string {
   return `${h12}:${String(m).padStart(2, '0')} ${suffix}`
 }
 
-/** e.g. "16-07" from YYYY-MM-DD */
-export function formatDdMm(isoDate: string): string {
+/** e.g. "16 Jul" from YYYY-MM-DD (customer Live on copy). */
+export function formatDayMonthShort(isoDate: string): string {
   const day = isoDate.slice(0, 10)
-  const [, mo, d] = day.split('-')
-  if (!mo || !d) return isoDate
-  return `${d}-${mo}`
+  const [y, mo, d] = day.split('-').map(Number)
+  if (!y || !mo || !d) return isoDate
+  return new Date(Date.UTC(y, mo - 1, d)).toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  })
+}
+
+/** @deprecated Prefer formatDayMonthShort for customer-facing copy. */
+export function formatDdMm(isoDate: string): string {
+  return formatDayMonthShort(isoDate)
 }
 
 /** Listing / eligibility copy when campaign has not started yet. */
 export function campaignLiveOnMessage(startDate: string, startTime = '00:00'): string {
   const start = normalizeHhMm(startTime)
-  const dateLabel = formatDdMm(startDate)
+  const dateLabel = formatDayMonthShort(startDate)
   if (isFullDayWindow(start, '23:59') || start === '00:00') {
     return `Live on ${dateLabel}`
   }

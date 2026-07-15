@@ -81,7 +81,7 @@ const cases: Case[] = [
   // Row 1 — created with start tomorrow
   {
     id: 'R1a',
-    name: 'Future start full-day → Live on dd-mm, no play',
+    name: 'Future start full-day → Live on day month, no play',
     now: ist('2026-07-15T12:00'),
     startDate: '2026-07-16',
     endDate: '2026-07-20',
@@ -90,11 +90,11 @@ const cases: Case[] = [
     expectVisible: true,
     expectPlay: false,
     expectLabel: 'LIVE_ON',
-    expectCopyIncludes: 'Live on 16-07',
+    expectCopyIncludes: 'Live on 16 Jul',
   },
   {
     id: 'R1b',
-    name: 'Future start timed → Live on dd-mm · time, no play',
+    name: 'Future start timed → Live on day month · time, no play',
     now: ist('2026-07-15T12:00'),
     startDate: '2026-07-16',
     endDate: '2026-07-20',
@@ -103,7 +103,7 @@ const cases: Case[] = [
     expectVisible: true,
     expectPlay: false,
     expectLabel: 'LIVE_ON',
-    expectCopyIncludes: 'Live on 16-07',
+    expectCopyIncludes: 'Live on 16 Jul',
   },
   {
     id: 'R1c',
