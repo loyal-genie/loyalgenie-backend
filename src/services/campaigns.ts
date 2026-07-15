@@ -10,6 +10,7 @@ import {
   nowInCampaignTz,
   isCampaignInWindow,
   currentTimeInCampaignTz,
+  outsideActiveHoursMessage,
 } from '../utils/campaign-dates.js'
 import {
   computeRedeemExpiryDate,
@@ -3592,7 +3593,7 @@ export async function checkEligibility(
       canPlay: false,
       playsRemaining: 0,
       playsUsedToday: 0,
-      message: 'Campaign is not running today',
+      message: outsideActiveHoursMessage(startTime, endTime),
       isNewParticipant: false,
       blockReason: 'campaign_inactive',
     }
@@ -3751,7 +3752,7 @@ export async function executeShakePlay(
     throw new Error(
       msg === 'Campaign user cap reached' ? 'USER_CAP_REACHED' :
       msg.includes('Daily') ? 'DAILY_LIMIT_REACHED' :
-      msg === 'Campaign is not active' || msg === 'Campaign is not running today' ? 'CAMPAIGN_NOT_ACTIVE' :
+      msg === 'Campaign is not active' || msg === 'Campaign is not running today' || msg.startsWith('Today · Active Hours') ? 'CAMPAIGN_NOT_ACTIVE' :
       'NO_PLAYS_REMAINING',
     )
   }

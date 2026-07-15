@@ -89,6 +89,40 @@ export function isCampaignInDateWindow(
   return today >= startDate && today <= endDate
 }
 
+/** Normalize to HH:MM for lexicographic compare (handles "9:00" and "09:00:00"). */
+function normalizeHhMm(time: string): string {
+  const raw = time.trim()
+  const match = /^(\d{1,2}):(\d{2})/.exec(raw)
+  if (!match) return raw.slice(0, 5)
+  const h = Math.min(23, Math.max(0, Number(match[1])))
+  const m = Math.min(59, Math.max(0, Number(match[2])))
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+
+function isFullDayWindow(startTime: string, endTime: string): boolean {
+  const start = normalizeHhMm(startTime)
+  const end = normalizeHhMm(endTime)
+  return (start === '00:00' || start === '0:00') && (end === '23:59' || end === '24:00')
+}
+
+/** e.g. "4:00 PM" from "16:00" */
+export function formatClockAmPm(hhmm: string): string {
+  const [hRaw, mRaw] = normalizeHhMm(hhmm).split(':').map(Number)
+  const h24 = Number.isFinite(hRaw) ? hRaw : 0
+  const m = Number.isFinite(mRaw) ? mRaw : 0
+  const suffix = h24 >= 12 ? 'PM' : 'AM'
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12
+  return `${h12}:${String(m).padStart(2, '0')} ${suffix}`
+}
+
+/** Customer-facing copy when outside the daily Active Hours window. */
+export function outsideActiveHoursMessage(startTime = '00:00', endTime = '23:59'): string {
+  const start = normalizeHhMm(startTime)
+  const end = normalizeHhMm(endTime)
+  if (isFullDayWindow(start, end)) return 'Campaign is not running today'
+  return `Today · Active Hours ${formatClockAmPm(start)}–${formatClockAmPm(end)}`
+}
+
 /** Date + optional IST time window (HH:MM). Defaults: 00:00 start, 23:59 end. */
 export function isCampaignInWindow(
   startDate: string,
@@ -100,8 +134,17 @@ export function isCampaignInWindow(
   const today = todayInCampaignTz(now)
   if (today < startDate || today > endDate) return false
   const time = currentTimeInCampaignTz(now)
-  if (today === startDate && time < startTime) return false
-  if (today === endDate && time > endTime) return false
+  const start = normalizeHhMm(startTime)
+  const end = normalizeHhMm(endTime)
+  // Active Hours / daily window: when not full-day, enforce every day in range.
+  // Full-day (00:00–23:59) keeps first/last-day gating for continuous custom ranges stored as 00:00/23:59.
+  const isFullDay = (start === '00:00' || start === '0:00') && (end === '23:59' || end === '24:00')
+  if (!isFullDay) {
+    if (time < start || time > end) return false
+    return true
+  }
+  if (today === startDate && time < start) return false
+  if (today === endDate && time > end) return false
   return true
 }
 
