@@ -213,6 +213,22 @@ async function syncParticipationsFromGamePlays(businessId: string) {
   )
 }
 
+async function countUniqueCustomers(businessId: string): Promise<number> {
+  // One person counted once for the business — never sum campaign enrollments.
+  const result = await db.execute({
+    sql: `
+      SELECT COUNT(*) AS c FROM (
+        SELECT DISTINCT gp.customer_id
+        FROM game_plays gp
+        INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
+        INNER JOIN customer_users cu ON cu.id = gp.customer_id
+      ) t
+    `,
+    args: [businessId],
+  })
+  return Number(result.rows[0]?.c ?? 0)
+}
+
 async function fetchCustomerSummaries(businessId: string): Promise<VendorCustomerSummary[]> {
   await syncParticipationsFromGamePlays(businessId)
 
@@ -229,9 +245,8 @@ async function fetchCustomerSummaries(businessId: string): Promise<VendorCustome
         COUNT(gp.id) AS total_visits,
         COUNT(gp.id) AS games_played,
         SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END) AS rewards_earned,
-        COALESCE(cr_agg.redeemed_count, 0) AS redeemed_count,
-        -- Same ledger the customer app shows (Rewards Galore / business_customer_points)
-        COALESCE(bcp.points, 0) AS total_loyalty_points
+        COALESCE(MAX(cr_agg.redeemed_count), 0) AS redeemed_count,
+        COALESCE(MAX(bcp.points), 0) AS total_loyalty_points
       FROM game_plays gp
       INNER JOIN campaigns c ON c.id = gp.campaign_id AND c.business_id = ?
       INNER JOIN customer_users cu ON cu.id = gp.customer_id
@@ -244,8 +259,7 @@ async function fetchCustomerSummaries(businessId: string): Promise<VendorCustome
       ) cr_agg ON cr_agg.customer_id = cu.id
       LEFT JOIN business_customer_points bcp
         ON bcp.customer_id = cu.id AND bcp.business_id = ?
-      GROUP BY cu.id, cu.name, cu.phone, cu.email, cu.created_at,
-               cr_agg.redeemed_count, bcp.points
+      GROUP BY cu.id, cu.name, cu.phone, cu.email, cu.created_at
       ORDER BY last_visit DESC
     `,
     args: [businessId, businessId, businessId, businessId],
@@ -539,10 +553,10 @@ async function computeVendorDashboardStats(
     })
     .slice(0, 6)
 
-  // Lifetime unique customers for Total Users card (never period-scoped)
-  const totalCustomers = customers.length
-  // Unique players in window — for all-time this equals totalCustomers
-  const uniquePlayers = windowDays === null ? totalCustomers : current.uniquePlayers
+  // Lifetime unique customers — one person = 1, regardless of how many campaigns they joined
+  const totalCustomers = await countUniqueCustomers(businessId)
+  // Same number for Total Players cards (do not use period-windowed play cohorts here)
+  const uniquePlayers = totalCustomers
 
   return {
     period,
