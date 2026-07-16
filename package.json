@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "dev": "sh -c 'if command -v tsx >/dev/null 2>&1; then exec tsx watch src/index.ts; else exec node dist/index.js; fi'",
-    "prestart": "npm run build",
     "start": "node dist/index.js",
     "build": "tsc",
     "db:apply-schema": "tsx scripts/apply-schema.ts",
