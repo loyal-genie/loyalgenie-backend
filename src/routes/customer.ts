@@ -3,10 +3,12 @@ import { z } from 'zod'
 import { requireCustomerAuth } from '../middleware/auth.js'
 import {
   buildCustomerNotifications,
+  fetchCustomerNotifications,
   getCustomerById,
   updateCustomerProfileFields,
 } from '../services/customer.js'
 import { signToken } from '../services/auth.js'
+import { db } from '../db/client.js'
 
 const router = Router()
 
@@ -80,15 +82,25 @@ router.patch('/profile', requireCustomerAuth, async (req, res) => {
 
 router.get('/notifications', requireCustomerAuth, async (req, res) => {
   try {
-    const profile = await getCustomerById(req.user!.id)
-    if (!profile) {
-      return res.status(404).json({ error: 'Profile not found' })
-    }
-    const notifications = buildCustomerNotifications(profile)
+    const notifications = await fetchCustomerNotifications(req.user!.id)
     res.json({ success: true, data: { notifications, unreadCount: notifications.length } })
   } catch (err) {
     console.error('Get customer notifications error:', err)
     res.status(500).json({ error: 'Could not load notifications' })
+  }
+})
+
+router.post('/notifications/:id/mark-read', requireCustomerAuth, async (req, res) => {
+  try {
+    const notificationId = String(req.params.id)
+    await db.execute({
+      sql: `UPDATE customer_notifications SET read_at = datetime('now') WHERE id = ? AND customer_id = ?`,
+      args: [notificationId, req.user!.id],
+    })
+    res.json({ success: true })
+  } catch (err) {
+    console.error('Mark notification as read error:', err)
+    res.status(500).json({ error: 'Could not mark notification as read' })
   }
 })
 

@@ -9,7 +9,10 @@ import {
   istDateSql,
   nowInCampaignTz,
   isCampaignInWindow,
-  currentTimeInCampaignTz,
+  outsideActiveHoursMessage,
+  campaignLiveOnMessage,
+  isPastCampaignEndMoment,
+  isBeforeCampaignStart,
 } from '../utils/campaign-dates.js'
 import {
   computeRedeemExpiryDate,
@@ -35,6 +38,97 @@ import {
   type CreateCheckInLoyaltyCampaignPayload,
 } from './check-in-loyalty-schema.js'
 import { getLoyaltyCampaignStats, type LoyaltyCampaignStats } from './check-in-loyalty.js'
+import {
+  createSpinCampaignSchema,
+  parseSpinConfig,
+  spinOverallWinners,
+  spinRewardShares,
+  spinWinRatePercent,
+  spinConfigSchema,
+  validateSpinConfig,
+  type CreateSpinCampaignPayload,
+  type SpinSegment,
+} from './spin-campaign-schema.js'
+import {
+  createDiceCampaignSchema,
+  parseDiceConfig,
+  diceOverallWinners,
+  diceRewardShares,
+  diceWinRatePercent,
+  diceConfigSchema,
+  validateDiceConfig,
+  type CreateDiceCampaignPayload,
+  type DiceOutcome,
+} from './dice-campaign-schema.js'
+import {
+  createLotteryCampaignSchema,
+  parseLotteryConfig,
+  lotteryConfigSchema,
+  validateLotteryConfig,
+  serializeLotteryConfig,
+  type CreateLotteryCampaignPayload,
+} from './lottery-campaign-schema.js'
+import { LOTTERY_UNLIMITED_USER_CAP } from './lottery-service.js'
+import {
+  createBuyXGetYCampaignSchema,
+  parseBuyXGetYConfig,
+  buyXGetYConfigSchema,
+  validateBuyXGetYConfig,
+  serializeBuyXGetYConfig,
+  formatBuyXGetYRewardLabel,
+  formatBuyXGetYDescription,
+  type CreateBuyXGetYCampaignPayload,
+} from './buy-x-get-y-campaign-schema.js'
+import {
+  createCouponCampaignSchema,
+  parseCouponConfig,
+  couponConfigSchema,
+  validateCouponConfig,
+  serializeCouponConfig,
+  formatCouponRewardLabel,
+  formatCouponDescription,
+  type CreateCouponCampaignPayload,
+} from './coupon-campaign-schema.js'
+import {
+  createFlashCampaignSchema,
+  parseFlashConfig,
+  flashConfigSchema,
+  validateFlashConfig,
+  serializeFlashConfig,
+  formatFlashRewardLabel,
+  formatFlashDescription,
+  type CreateFlashCampaignPayload,
+} from './flash-campaign-schema.js'
+import {
+  createComboCampaignSchema,
+  parseComboConfig,
+  comboConfigSchema,
+  validateComboConfig,
+  serializeComboConfig,
+  formatComboRewardLabel,
+  formatComboDescription,
+  type CreateComboCampaignPayload,
+} from './combo-campaign-schema.js'
+import {
+  createGroupUnlockCampaignSchema,
+  parseGroupUnlockConfig,
+  groupUnlockConfigSchema,
+  validateGroupUnlockConfig,
+  serializeGroupUnlockConfig,
+  formatGroupUnlockRewardLabel,
+  formatGroupUnlockDescription,
+  type CreateGroupUnlockCampaignPayload,
+} from './groupunlock-campaign-schema.js'
+import {
+  createFriendCampaignSchema,
+  parseFriendConfig,
+  friendConfigSchema,
+  validateFriendConfig,
+  serializeFriendConfig,
+  formatFriendRewardLabel,
+  formatFriendDescription,
+  type CreateFriendCampaignPayload,
+} from './friend-campaign-schema.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 import { TtlCache } from '../utils/ttl-cache.js'
 import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
@@ -95,8 +189,17 @@ export const createShakeCampaignSchema = z.object({
 
 export const createCampaignSchema = z.discriminatedUnion('mechanic', [
   createShakeCampaignSchema,
+  createBuyXGetYCampaignSchema,
+  createCouponCampaignSchema,
+  createFlashCampaignSchema,
+  createComboCampaignSchema,
+  createGroupUnlockCampaignSchema,
+  createFriendCampaignSchema,
+  createSpinCampaignSchema,
+  createDiceCampaignSchema,
   createStampCampaignSchema,
   createCheckInLoyaltyCampaignSchema,
+  createLotteryCampaignSchema,
 ])
 
 export type CreateCampaignPayload = z.infer<typeof createCampaignSchema>
@@ -140,6 +243,16 @@ export const updateCampaignSchema = z.object({
   stampConfig: stampConfigSchema.optional(),
   checkInConfig: checkInLoyaltyConfigSchema.optional(),
   milestones: z.array(updateLoyaltyMilestoneSchema).optional(),
+  spinConfig: spinConfigSchema.optional(),
+  diceConfig: diceConfigSchema.optional(),
+  lotteryConfig: lotteryConfigSchema.optional(),
+  buyXGetYConfig: buyXGetYConfigSchema.optional(),
+  couponConfig: couponConfigSchema.optional(),
+  flashConfig: flashConfigSchema.optional(),
+  comboConfig: comboConfigSchema.optional(),
+  groupUnlockConfig: groupUnlockConfigSchema.optional(),
+  friendConfig: friendConfigSchema.optional(),
+  startTime: timeSchema.optional(),
 })
 
 export interface UpdateCampaignPayload {
@@ -170,6 +283,16 @@ export interface UpdateCampaignPayload {
   stampConfig?: z.infer<typeof stampConfigSchema>
   checkInConfig?: z.infer<typeof checkInLoyaltyConfigSchema>
   milestones?: { id?: string; name: string; description?: string; icon: string; pointsThreshold: number }[]
+  spinConfig?: z.infer<typeof spinConfigSchema>
+  diceConfig?: z.infer<typeof diceConfigSchema>
+  lotteryConfig?: z.infer<typeof lotteryConfigSchema>
+  buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema>
+  couponConfig?: z.infer<typeof couponConfigSchema>
+  flashConfig?: z.infer<typeof flashConfigSchema>
+  comboConfig?: z.infer<typeof comboConfigSchema>
+  groupUnlockConfig?: z.infer<typeof groupUnlockConfigSchema>
+  friendConfig?: z.infer<typeof friendConfigSchema>
+  startTime?: string
 }
 
 type StampTierRewards = {
@@ -264,6 +387,15 @@ export interface CampaignRow {
   redeemedCount: number
   stampStats?: StampCampaignStats | null
   loyaltyStats?: LoyaltyCampaignStats | null
+  spinConfig?: z.infer<typeof spinConfigSchema> | null
+  diceConfig?: z.infer<typeof diceConfigSchema> | null
+  lotteryConfig?: z.infer<typeof lotteryConfigSchema> | null
+  buyXGetYConfig?: z.infer<typeof buyXGetYConfigSchema> | null
+  couponConfig?: z.infer<typeof couponConfigSchema> | null
+  flashConfig?: z.infer<typeof flashConfigSchema> | null
+  comboConfig?: z.infer<typeof comboConfigSchema> | null
+  groupUnlockConfig?: z.infer<typeof groupUnlockConfigSchema> | null
+  friendConfig?: z.infer<typeof friendConfigSchema> | null
 }
 
 /** Lightweight campaign read — no stats/rewards aggregation (hot paths). */
@@ -384,20 +516,47 @@ export function pinCycleSecondsForMechanic(_mechanic: string): number {
   return PIN_CYCLE_SECONDS
 }
 
-async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
+export async function autoEndExpiredCampaigns(businessId?: string): Promise<void> {
   const today = todayInCampaignTz()
+  const now = nowInCampaignTz()
+
   if (businessId) {
     await db.execute({
       sql: `UPDATE campaigns SET status = 'ended'
             WHERE business_id = ? AND status IN ('active', 'paused') AND end_date < ?`,
       args: [businessId, today],
     })
-    return
+  } else {
+    await db.execute({
+      sql: `UPDATE campaigns SET status = 'ended'
+            WHERE status IN ('active', 'paused') AND end_date < ?`,
+      args: [today],
+    })
   }
+
+  // Same calendar day, past end_time (e.g. ends 21:00 → remove after 21:00).
+  // Stamp uses claim-period rules — leave those for ensureCampaignNotPastEnd / stamp filters.
+  const dueResult = await db.execute({
+    sql: businessId
+      ? `SELECT id, end_time, mechanic FROM campaigns
+         WHERE business_id = ? AND status IN ('active', 'paused') AND end_date = ? AND mechanic != 'stamp'`
+      : `SELECT id, end_time, mechanic FROM campaigns
+         WHERE status IN ('active', 'paused') AND end_date = ? AND mechanic != 'stamp'`,
+    args: businessId ? [businessId, today] : [today],
+  })
+
+  const expiredIds: string[] = []
+  for (const row of dueResult.rows) {
+    const endTime = (row.end_time as string) ?? '23:59'
+    if (isPastCampaignEndMoment(today, endTime, now)) {
+      expiredIds.push(row.id as string)
+    }
+  }
+  if (expiredIds.length === 0) return
+  const placeholders = expiredIds.map(() => '?').join(', ')
   await db.execute({
-    sql: `UPDATE campaigns SET status = 'ended'
-          WHERE status IN ('active', 'paused') AND end_date < ?`,
-    args: [today],
+    sql: `UPDATE campaigns SET status = 'ended' WHERE id IN (${placeholders})`,
+    args: expiredIds,
   })
 }
 
@@ -427,9 +586,7 @@ async function ensureCampaignNotPastEnd(row: Record<string, unknown>): Promise<R
     return row
   }
 
-  const pastEndDate = today > endDate
-  const pastEndTime = today === endDate && currentTimeInCampaignTz(now) > endTime
-  if (pastEndDate || pastEndTime) {
+  if (isPastCampaignEndMoment(endDate, endTime, now)) {
     await db.execute({
       sql: `UPDATE campaigns SET status = 'ended' WHERE id = ?`,
       args: [row.id as string],
@@ -693,6 +850,33 @@ async function rowToCampaign(row: Record<string, unknown>): Promise<CampaignRow>
   if (mechanic === 'check-in-loyalty') {
     base.loyaltyStats = await getLoyaltyCampaignStats(id)
   }
+  if (mechanic === 'spin') {
+    base.spinConfig = parseSpinConfig(base.configJson)
+  }
+  if (mechanic === 'dice') {
+    base.diceConfig = parseDiceConfig(base.configJson)
+  }
+  if (mechanic === 'lottery') {
+    base.lotteryConfig = parseLotteryConfig(base.configJson)
+  }
+  if (mechanic === 'buy-x-get-y') {
+    base.buyXGetYConfig = parseBuyXGetYConfig(base.configJson)
+  }
+  if (mechanic === 'coupon') {
+    base.couponConfig = parseCouponConfig(base.configJson)
+  }
+  if (mechanic === 'flash') {
+    base.flashConfig = parseFlashConfig(base.configJson)
+  }
+  if (mechanic === 'combo') {
+    base.comboConfig = parseComboConfig(base.configJson)
+  }
+  if (mechanic === 'groupunlock') {
+    base.groupUnlockConfig = parseGroupUnlockConfig(base.configJson)
+  }
+  if (mechanic === 'friend') {
+    base.friendConfig = parseFriendConfig(base.configJson)
+  }
   return base
 }
 
@@ -766,6 +950,453 @@ async function createShakeCampaign(userId: string, payload: CreateShakeCampaignP
   ]
 
   await db.batch(statements)
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createSpinCampaign(userId: string, payload: CreateSpinCampaignPayload) {
+  validateSpinConfig(payload.spinConfig)
+
+  const winSegments = payload.spinConfig.segments.filter(s => s.isWin && (s.reward ?? '').trim())
+  const overallWinners = spinOverallWinners(payload.userCap, payload.spinConfig.segments)
+  if (overallWinners > payload.userCap) {
+    throw new Error('OVERALL_WINNERS_EXCEEDS_USER_CAP')
+  }
+
+  const shares = spinRewardShares(winSegments)
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('spin')
+  const perDayUserLimit =
+    payload.startDate === payload.endDate
+      ? payload.userCap
+      : Math.min(payload.perDayUserLimit, payload.userCap)
+  const winRatePercent = spinWinRatePercent(payload.spinConfig.segments)
+  const configJson = JSON.stringify({
+    type: 'spin',
+    spinConfig: payload.spinConfig,
+  })
+
+  const statements = [
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'spin', 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap, perDayUserLimit, payload.playsPerDay,
+        winRatePercent, overallWinners, configJson,
+        pin, pinExpires,
+      ],
+    },
+    ...winSegments.map((seg, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      args: [
+        seg.id ?? nanoid(), campaignId, (seg.reward ?? '').trim(), seg.description ?? '', seg.icon ?? '🎁', shares[i] ?? 100, i,
+        seg.redeemExpiryMode ?? 'relative',
+        seg.redeemExpiryMode === 'fixed' ? (seg.redeemFixedDate ?? null) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeAmount ?? 7) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+
+  await db.batch(statements)
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createDiceCampaign(userId: string, payload: CreateDiceCampaignPayload) {
+  validateDiceConfig(payload.diceConfig)
+
+  const winOutcomes = payload.diceConfig.outcomes.filter(o => o.isWin && (o.reward ?? '').trim())
+  const overallWinners = diceOverallWinners(payload.userCap, payload.diceConfig.outcomes)
+  if (overallWinners > payload.userCap) {
+    throw new Error('OVERALL_WINNERS_EXCEEDS_USER_CAP')
+  }
+
+  const shares = diceRewardShares(winOutcomes)
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('dice')
+  const perDayUserLimit =
+    payload.startDate === payload.endDate
+      ? payload.userCap
+      : Math.min(payload.perDayUserLimit, payload.userCap)
+  const winRatePercent = diceWinRatePercent(payload.diceConfig.outcomes)
+  const configJson = JSON.stringify({
+    type: 'dice',
+    diceConfig: payload.diceConfig,
+  })
+
+  const statements = [
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'dice', 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap, perDayUserLimit, payload.playsPerDay,
+        winRatePercent, overallWinners, configJson,
+        pin, pinExpires,
+      ],
+    },
+    ...winOutcomes.map((outcome, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      args: [
+        outcome.id ?? nanoid(), campaignId, (outcome.reward ?? '').trim(), outcome.description ?? '', outcome.icon ?? '🎁', shares[i] ?? 100, i,
+        outcome.redeemExpiryMode ?? 'relative',
+        outcome.redeemExpiryMode === 'fixed' ? (outcome.redeemFixedDate ?? null) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeAmount ?? 7) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+
+  await db.batch(statements)
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createLotteryCampaign(userId: string, payload: CreateLotteryCampaignPayload) {
+  validateLotteryConfig(payload.lotteryConfig)
+
+  const prizes = payload.lotteryConfig.prizes.filter(p => p.reward.trim())
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('lottery')
+  const configJson = serializeLotteryConfig(payload.lotteryConfig)
+
+  const statements = [
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'lottery', 'active', ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        LOTTERY_UNLIMITED_USER_CAP, LOTTERY_UNLIMITED_USER_CAP,
+        prizes.length, configJson, pin, pinExpires,
+      ],
+    },
+    ...prizes.map((prize, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        prize.id ?? nanoid(),
+        campaignId,
+        prize.reward.trim(),
+        prize.name.trim(),
+        prize.icon ?? (prize.tier === 'jackpot' ? '👑' : '🎁'),
+        i,
+        prize.tier,
+        payload.lotteryConfig.redeemExpiryMode,
+        payload.lotteryConfig.redeemExpiryMode === 'fixed' ? (payload.lotteryConfig.redeemFixedDate ?? null) : null,
+        payload.lotteryConfig.redeemExpiryMode === 'relative' ? (payload.lotteryConfig.redeemRelativeAmount ?? 7) : null,
+        payload.lotteryConfig.redeemExpiryMode === 'relative' ? (payload.lotteryConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+
+  await db.batch(statements)
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createBuyXGetYCampaign(userId: string, payload: CreateBuyXGetYCampaignPayload) {
+  validateBuyXGetYConfig(payload.buyXGetYConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('buy-x-get-y')
+  const configJson = serializeBuyXGetYConfig(payload.buyXGetYConfig)
+  const rewardLabel = formatBuyXGetYRewardLabel(payload.buyXGetYConfig)
+  const rewardDescription = formatBuyXGetYDescription(payload.buyXGetYConfig)
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'buy-x-get-y', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap, payload.userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '💰', 100, 0, 'buy_x_get_y', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.buyXGetYConfig.redeemExpiryMode,
+        payload.buyXGetYConfig.redeemExpiryMode === 'fixed' ? (payload.buyXGetYConfig.redeemFixedDate ?? null) : null,
+        payload.buyXGetYConfig.redeemExpiryMode === 'relative' ? (payload.buyXGetYConfig.redeemRelativeAmount ?? 7) : null,
+        payload.buyXGetYConfig.redeemExpiryMode === 'relative' ? (payload.buyXGetYConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createCouponCampaign(userId: string, payload: CreateCouponCampaignPayload) {
+  validateCouponConfig(payload.couponConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('coupon')
+  const configJson = serializeCouponConfig(payload.couponConfig)
+  const rewardLabel = formatCouponRewardLabel(payload.couponConfig)
+  const rewardDescription = formatCouponDescription(payload.couponConfig)
+  const userCap = payload.couponConfig.totalCoupons
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'coupon', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        userCap, userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '🎫', 100, 0, 'coupon', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.couponConfig.redeemExpiryMode,
+        payload.couponConfig.redeemExpiryMode === 'fixed' ? (payload.couponConfig.redeemFixedDate ?? null) : null,
+        payload.couponConfig.redeemExpiryMode === 'relative' ? (payload.couponConfig.redeemRelativeAmount ?? 14) : null,
+        payload.couponConfig.redeemExpiryMode === 'relative' ? (payload.couponConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createFlashCampaign(userId: string, payload: CreateFlashCampaignPayload) {
+  validateFlashConfig(payload.flashConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('flash')
+  const configJson = serializeFlashConfig(payload.flashConfig)
+  const rewardLabel = formatFlashRewardLabel(payload.flashConfig)
+  const rewardDescription = formatFlashDescription(payload.flashConfig)
+  const userCap = payload.flashConfig.totalSlots
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'flash', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        userCap, userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '⚡', 100, 0, 'flash', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.flashConfig.redeemExpiryMode,
+        payload.flashConfig.redeemExpiryMode === 'fixed' ? (payload.flashConfig.redeemFixedDate ?? null) : null,
+        payload.flashConfig.redeemExpiryMode === 'relative' ? (payload.flashConfig.redeemRelativeAmount ?? 3) : null,
+        payload.flashConfig.redeemExpiryMode === 'relative' ? (payload.flashConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createComboCampaign(userId: string, payload: CreateComboCampaignPayload) {
+  validateComboConfig(payload.comboConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('combo')
+  const configJson = serializeComboConfig(payload.comboConfig)
+  const rewardLabel = formatComboRewardLabel(payload.comboConfig)
+  const rewardDescription = formatComboDescription(payload.comboConfig)
+  const userCap = payload.comboConfig.totalSpots
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'combo', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        userCap, userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '🎁', 100, 0, 'combo', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.comboConfig.redeemExpiryMode,
+        payload.comboConfig.redeemExpiryMode === 'fixed' ? (payload.comboConfig.redeemFixedDate ?? null) : null,
+        payload.comboConfig.redeemExpiryMode === 'relative' ? (payload.comboConfig.redeemRelativeAmount ?? 14) : null,
+        payload.comboConfig.redeemExpiryMode === 'relative' ? (payload.comboConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createGroupUnlockCampaign(userId: string, payload: CreateGroupUnlockCampaignPayload) {
+  validateGroupUnlockConfig(payload.groupUnlockConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('groupunlock')
+  const configJson = serializeGroupUnlockConfig(payload.groupUnlockConfig)
+  const rewardLabel = formatGroupUnlockRewardLabel(payload.groupUnlockConfig)
+  const rewardDescription = formatGroupUnlockDescription(payload.groupUnlockConfig)
+  const userCap = payload.groupUnlockConfig.targetParticipants
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'groupunlock', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        userCap, userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '🤝', 100, 0, 'groupunlock', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.groupUnlockConfig.redeemExpiryMode,
+        payload.groupUnlockConfig.redeemExpiryMode === 'fixed' ? (payload.groupUnlockConfig.redeemFixedDate ?? null) : null,
+        payload.groupUnlockConfig.redeemExpiryMode === 'relative' ? (payload.groupUnlockConfig.redeemRelativeAmount ?? 14) : null,
+        payload.groupUnlockConfig.redeemExpiryMode === 'relative' ? (payload.groupUnlockConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
+
+  return campaignRowAfterCreate(campaignId)
+}
+
+async function createFriendCampaign(userId: string, payload: CreateFriendCampaignPayload) {
+  validateFriendConfig(payload.friendConfig)
+
+  const businessId = await getBusinessIdForUser(userId)
+  const campaignId = nanoid()
+  const pin = generatePin()
+  const pinExpires = pinExpiresAtIso('friend')
+  const configJson = serializeFriendConfig(payload.friendConfig)
+  const rewardLabel = formatFriendRewardLabel(payload.friendConfig)
+  const rewardDescription = formatFriendDescription(payload.friendConfig)
+
+  await db.batch([
+    {
+      sql: `INSERT INTO campaigns (
+        id, business_id, name, mechanic, status, start_date, end_date, start_time, end_time,
+        user_cap, per_day_user_limit, plays_per_day, win_rate_percent,
+        overall_winners, config_json,
+        pin, pin_expires_at, claim_period_days
+      ) VALUES (?, ?, ?, 'friend', 'active', ?, ?, ?, ?, ?, ?, 1, 100, 1, ?, ?, ?, 30)`,
+      args: [
+        campaignId, businessId, payload.name,
+        payload.startDate, payload.endDate, payload.startTime, payload.endTime,
+        payload.userCap, payload.userCap,
+        configJson, pin, pinExpires,
+      ],
+    },
+    {
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, '👫', 100, 0, 'friend', ?, ?, ?, ?)`,
+      args: [
+        nanoid(),
+        campaignId,
+        rewardLabel,
+        rewardDescription,
+        payload.friendConfig.redeemExpiryMode,
+        payload.friendConfig.redeemExpiryMode === 'fixed' ? (payload.friendConfig.redeemFixedDate ?? null) : null,
+        payload.friendConfig.redeemExpiryMode === 'relative' ? (payload.friendConfig.redeemRelativeAmount ?? 7) : null,
+        payload.friendConfig.redeemExpiryMode === 'relative' ? (payload.friendConfig.redeemRelativeUnit ?? 'day') : null,
+      ],
+    },
+  ])
 
   return campaignRowAfterCreate(campaignId)
 }
@@ -891,6 +1522,24 @@ export async function createCampaign(userId: string, payload: CreateCampaignPayl
     created = await createStampCampaign(userId, payload)
   } else if (payload.mechanic === 'check-in-loyalty') {
     created = await createCheckInLoyaltyCampaignHandler(userId, payload)
+  } else if (payload.mechanic === 'spin') {
+    created = await createSpinCampaign(userId, payload)
+  } else if (payload.mechanic === 'dice') {
+    created = await createDiceCampaign(userId, payload)
+  } else if (payload.mechanic === 'lottery') {
+    created = await createLotteryCampaign(userId, payload)
+  } else if (payload.mechanic === 'buy-x-get-y') {
+    created = await createBuyXGetYCampaign(userId, payload)
+  } else if (payload.mechanic === 'coupon') {
+    created = await createCouponCampaign(userId, payload)
+  } else if (payload.mechanic === 'flash') {
+    created = await createFlashCampaign(userId, payload)
+  } else if (payload.mechanic === 'combo') {
+    created = await createComboCampaign(userId, payload)
+  } else if (payload.mechanic === 'groupunlock') {
+    created = await createGroupUnlockCampaign(userId, payload)
+  } else if (payload.mechanic === 'friend') {
+    created = await createFriendCampaign(userId, payload)
   } else {
     created = await createShakeCampaign(userId, payload)
   }
@@ -960,6 +1609,24 @@ export async function updateCampaign(
     updated = await updateStampCampaign(userId, existing, payload)
   } else if (existing.mechanic === 'check-in-loyalty') {
     updated = await updateLoyaltyCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'spin') {
+    updated = await updateSpinCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'dice') {
+    updated = await updateDiceCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'lottery') {
+    updated = await updateLotteryCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'buy-x-get-y') {
+    updated = await updateBuyXGetYCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'coupon') {
+    updated = await updateCouponCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'flash') {
+    updated = await updateFlashCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'combo') {
+    updated = await updateComboCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'groupunlock') {
+    updated = await updateGroupUnlockCampaign(userId, existing, payload)
+  } else if (existing.mechanic === 'friend') {
+    updated = await updateFriendCampaign(userId, existing, payload)
   } else {
     updated = await updateShakeCampaign(userId, existing, payload)
   }
@@ -990,12 +1657,20 @@ export async function deleteCampaign(
   const row = owned.rows[0] as { id: string; name: string } | undefined
   if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
 
-  const [participations, gamePlays, customerRewards, stampCards, loyaltyCards] = await Promise.all([
+  const [participations, gamePlays, customerRewards, stampCards, loyaltyCards, lotteryTickets, notifications] = await Promise.all([
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM campaign_participations WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM game_plays WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM customer_rewards WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM stamp_cards WHERE campaign_id = ?', args: [campaignId] }),
     db.execute({ sql: 'SELECT COUNT(*) AS c FROM loyalty_cards WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM lottery_tickets WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'SELECT COUNT(*) AS c FROM customer_notifications WHERE campaign_id = ?', args: [campaignId] }),
+  ])
+
+  // Delete lottery-related rows first
+  await Promise.all([
+    db.execute({ sql: 'DELETE FROM lottery_tickets WHERE campaign_id = ?', args: [campaignId] }),
+    db.execute({ sql: 'DELETE FROM customer_notifications WHERE campaign_id = ?', args: [campaignId] }),
   ])
 
   await db.execute({
@@ -1139,6 +1814,810 @@ async function replaceShakeRewards(
     })),
   ]
   await db.batch(statements)
+}
+
+async function replaceSpinRewards(
+  campaignId: string,
+  _existingRewards: CampaignReward[],
+  segments: SpinSegment[],
+) {
+  const winSegments = segments.filter(s => s.isWin && (s.reward ?? '').trim())
+  const shares = spinRewardShares(winSegments)
+  const statements = [
+    {
+      sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
+      args: [campaignId],
+    },
+    ...winSegments.map((seg, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        seg.id ?? nanoid(),
+        campaignId,
+        (seg.reward ?? '').trim(),
+        seg.description ?? '',
+        seg.icon ?? '🎁',
+        shares[i] ?? 100,
+        i,
+        seg.redeemExpiryMode ?? 'relative',
+        seg.redeemExpiryMode === 'fixed' ? (seg.redeemFixedDate ?? null) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeAmount ?? 7) : null,
+        seg.redeemExpiryMode === 'relative' ? (seg.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+  await db.batch(statements)
+}
+
+async function updateSpinCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (payload.spinConfig) {
+    validateSpinConfig(payload.spinConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?')
+    args.push(payload.userCap)
+  }
+  if (payload.playsPerDay !== undefined) {
+    fields.push('plays_per_day = ?')
+    args.push(payload.playsPerDay)
+  }
+  if (payload.perDayUserLimit !== undefined) {
+    fields.push('per_day_user_limit = ?')
+    args.push(payload.perDayUserLimit)
+  }
+  if (payload.status !== undefined) {
+    fields.push('status = ?')
+    args.push(payload.status)
+  }
+
+  const segments = payload.spinConfig?.segments
+  const userCapForRate = payload.userCap ?? existing.userCap
+
+  if (segments) {
+    const overallWinners = spinOverallWinners(userCapForRate, segments)
+    const winRatePercent = spinWinRatePercent(segments)
+    fields.push('overall_winners = ?', 'win_rate_percent = ?', 'config_json = ?')
+    args.push(
+      overallWinners,
+      winRatePercent,
+      JSON.stringify({ type: 'spin', spinConfig: payload.spinConfig }),
+    )
+  } else if (payload.userCap !== undefined) {
+    const config = parseSpinConfig(existing.configJson)
+    if (config) {
+      const overallWinners = spinOverallWinners(userCapForRate, config.segments)
+      const winRatePercent = spinWinRatePercent(config.segments)
+      fields.push('overall_winners = ?', 'win_rate_percent = ?')
+      args.push(overallWinners, winRatePercent)
+    }
+  }
+
+  if (fields.length === 0 && !payload.spinConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.spinConfig) {
+    await replaceSpinRewards(existing.id, existing.rewards, payload.spinConfig.segments)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceDiceRewards(campaignId: string, outcomes: DiceOutcome[]) {
+  const winOutcomes = outcomes.filter(o => o.isWin && (o.reward ?? '').trim())
+  const shares = diceRewardShares(winOutcomes)
+  const statements = [
+    {
+      sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?',
+      args: [campaignId],
+    },
+    ...winOutcomes.map((outcome, i) => ({
+      sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order,
+              redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        outcome.id ?? nanoid(),
+        campaignId,
+        (outcome.reward ?? '').trim(),
+        outcome.description ?? '',
+        outcome.icon ?? '🎁',
+        shares[i] ?? 100,
+        i,
+        outcome.redeemExpiryMode ?? 'relative',
+        outcome.redeemExpiryMode === 'fixed' ? (outcome.redeemFixedDate ?? null) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeAmount ?? 7) : null,
+        outcome.redeemExpiryMode === 'relative' ? (outcome.redeemRelativeUnit ?? 'day') : null,
+      ],
+    })),
+  ]
+  await db.batch(statements)
+}
+
+async function updateDiceCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (payload.diceConfig) {
+    validateDiceConfig(payload.diceConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?')
+    args.push(payload.userCap)
+  }
+  if (payload.playsPerDay !== undefined) {
+    fields.push('plays_per_day = ?')
+    args.push(payload.playsPerDay)
+  }
+  if (payload.perDayUserLimit !== undefined) {
+    fields.push('per_day_user_limit = ?')
+    args.push(payload.perDayUserLimit)
+  }
+  if (payload.status !== undefined) {
+    fields.push('status = ?')
+    args.push(payload.status)
+  }
+
+  const outcomes = payload.diceConfig?.outcomes
+  const userCapForRate = payload.userCap ?? existing.userCap
+
+  if (outcomes) {
+    const overallWinners = diceOverallWinners(userCapForRate, outcomes)
+    const winRatePercent = diceWinRatePercent(outcomes)
+    fields.push('overall_winners = ?', 'win_rate_percent = ?', 'config_json = ?')
+    args.push(
+      overallWinners,
+      winRatePercent,
+      JSON.stringify({ type: 'dice', diceConfig: payload.diceConfig }),
+    )
+  } else if (payload.userCap !== undefined) {
+    const config = parseDiceConfig(existing.configJson)
+    if (config) {
+      const overallWinners = diceOverallWinners(userCapForRate, config.outcomes)
+      const winRatePercent = diceWinRatePercent(config.outcomes)
+      fields.push('overall_winners = ?', 'win_rate_percent = ?')
+      args.push(overallWinners, winRatePercent)
+    }
+  }
+
+  if (fields.length === 0 && !payload.diceConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.diceConfig) {
+    await replaceDiceRewards(existing.id, payload.diceConfig.outcomes)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceLotteryRewards(campaignId: string, config: z.infer<typeof lotteryConfigSchema>) {
+  const prizes = config.prizes.filter(p => p.reward.trim())
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const statements = prizes.map((prize, i) => ({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      prize.id ?? nanoid(),
+      campaignId,
+      prize.reward.trim(),
+      prize.name.trim(),
+      prize.icon ?? (prize.tier === 'jackpot' ? '👑' : '🎁'),
+      i,
+      prize.tier,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 7) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  }))
+  if (statements.length > 0) await db.batch(statements)
+}
+
+async function updateLotteryCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+  const currentConfig = parseLotteryConfig(existing.configJson)
+  if (currentConfig?.drawCompleted) throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.lotteryConfig) {
+    validateLotteryConfig(payload.lotteryConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.lotteryConfig) {
+    fields.push('config_json = ?', 'overall_winners = ?')
+    args.push(
+      serializeLotteryConfig(payload.lotteryConfig),
+      payload.lotteryConfig.prizes.filter(p => p.reward.trim()).length,
+    )
+  }
+
+  if (fields.length === 0 && !payload.lotteryConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.lotteryConfig) {
+    await replaceLotteryRewards(existing.id, payload.lotteryConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceBuyXGetYReward(campaignId: string, config: z.infer<typeof buyXGetYConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatBuyXGetYRewardLabel(config)
+  const rewardDescription = formatBuyXGetYDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '💰', 100, 0, 'buy_x_get_y', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 7) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateBuyXGetYCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.buyXGetYConfig) {
+    validateBuyXGetYConfig(payload.buyXGetYConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.userCap !== undefined) {
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(payload.userCap, payload.userCap)
+  }
+  if (payload.buyXGetYConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeBuyXGetYConfig(payload.buyXGetYConfig))
+  }
+
+  if (fields.length === 0 && !payload.buyXGetYConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.buyXGetYConfig) {
+    await replaceBuyXGetYReward(existing.id, payload.buyXGetYConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceCouponReward(campaignId: string, config: z.infer<typeof couponConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatCouponRewardLabel(config)
+  const rewardDescription = formatCouponDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '🎫', 100, 0, 'coupon', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 14) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateCouponCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.couponConfig) {
+    validateCouponConfig(payload.couponConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  const userCap = payload.couponConfig?.totalCoupons ?? payload.userCap
+  if (userCap !== undefined) {
+    if (userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(userCap, userCap)
+  }
+  if (payload.couponConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeCouponConfig(payload.couponConfig))
+  }
+
+  if (fields.length === 0 && !payload.couponConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.couponConfig) {
+    await replaceCouponReward(existing.id, payload.couponConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceFlashReward(campaignId: string, config: z.infer<typeof flashConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatFlashRewardLabel(config)
+  const rewardDescription = formatFlashDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '⚡', 100, 0, 'flash', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 3) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateFlashCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.flashConfig) {
+    validateFlashConfig(payload.flashConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  const userCap = payload.flashConfig?.totalSlots ?? payload.userCap
+  if (userCap !== undefined) {
+    if (userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(userCap, userCap)
+  }
+  if (payload.flashConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeFlashConfig(payload.flashConfig))
+  }
+
+  if (fields.length === 0 && !payload.flashConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.flashConfig) {
+    await replaceFlashReward(existing.id, payload.flashConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceComboReward(campaignId: string, config: z.infer<typeof comboConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatComboRewardLabel(config)
+  const rewardDescription = formatComboDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '🎁', 100, 0, 'combo', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 14) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateComboCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.comboConfig) {
+    validateComboConfig(payload.comboConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  const userCap = payload.comboConfig?.totalSpots ?? payload.userCap
+  if (userCap !== undefined) {
+    if (userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(userCap, userCap)
+  }
+  if (payload.comboConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeComboConfig(payload.comboConfig))
+  }
+
+  if (fields.length === 0 && !payload.comboConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.comboConfig) {
+    await replaceComboReward(existing.id, payload.comboConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceGroupUnlockReward(campaignId: string, config: z.infer<typeof groupUnlockConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatGroupUnlockRewardLabel(config)
+  const rewardDescription = formatGroupUnlockDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '🤝', 100, 0, 'groupunlock', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 14) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateGroupUnlockCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.groupUnlockConfig) {
+    validateGroupUnlockConfig(payload.groupUnlockConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  const userCap = payload.groupUnlockConfig?.targetParticipants ?? payload.userCap
+  if (userCap !== undefined) {
+    if (userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(userCap, userCap)
+  }
+  if (payload.groupUnlockConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeGroupUnlockConfig(payload.groupUnlockConfig))
+  }
+
+  if (fields.length === 0 && !payload.groupUnlockConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.groupUnlockConfig) {
+    await replaceGroupUnlockReward(existing.id, payload.groupUnlockConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
+}
+
+async function replaceFriendReward(campaignId: string, config: z.infer<typeof friendConfigSchema>) {
+  await db.execute({ sql: 'DELETE FROM campaign_rewards WHERE campaign_id = ?', args: [campaignId] })
+  const rewardLabel = formatFriendRewardLabel(config)
+  const rewardDescription = formatFriendDescription(config)
+  await db.execute({
+    sql: `INSERT INTO campaign_rewards (id, campaign_id, name, description, icon, share_percent, sort_order, reward_tier,
+            redeem_expiry_mode, redeem_fixed_date, redeem_relative_amount, redeem_relative_unit)
+          VALUES (?, ?, ?, ?, '👫', 100, 0, 'friend', ?, ?, ?, ?)`,
+    args: [
+      nanoid(),
+      campaignId,
+      rewardLabel,
+      rewardDescription,
+      config.redeemExpiryMode,
+      config.redeemExpiryMode === 'fixed' ? (config.redeemFixedDate ?? null) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeAmount ?? 7) : null,
+      config.redeemExpiryMode === 'relative' ? (config.redeemRelativeUnit ?? 'day') : null,
+    ],
+  })
+}
+
+async function updateFriendCampaign(
+  userId: string,
+  existing: CampaignRow,
+  payload: UpdateCampaignPayload,
+) {
+  if (existing.status === 'ended') throw new Error('CAMPAIGN_ENDED')
+
+  if (payload.friendConfig) {
+    validateFriendConfig(payload.friendConfig)
+  }
+
+  const fields: string[] = []
+  const args: (string | number)[] = []
+
+  if (payload.name !== undefined) {
+    fields.push('name = ?')
+    args.push(payload.name)
+  }
+  if (payload.endDate !== undefined) {
+    fields.push('end_date = ?')
+    args.push(payload.endDate)
+  }
+  if (payload.endTime !== undefined) {
+    fields.push('end_time = ?')
+    args.push(payload.endTime)
+  }
+  if (payload.startTime !== undefined) {
+    fields.push('start_time = ?')
+    args.push(payload.startTime)
+  }
+  if (payload.userCap !== undefined) {
+    if (payload.userCap < existing.currentUsers) {
+      throw new Error('USER_CAP_BELOW_CURRENT')
+    }
+    fields.push('user_cap = ?', 'per_day_user_limit = ?')
+    args.push(payload.userCap, payload.userCap)
+  }
+  if (payload.friendConfig) {
+    fields.push('config_json = ?')
+    args.push(serializeFriendConfig(payload.friendConfig))
+  }
+
+  if (fields.length === 0 && !payload.friendConfig) {
+    return existing
+  }
+
+  if (fields.length > 0) {
+    args.push(existing.id, existing.businessId)
+    await db.execute({
+      sql: `UPDATE campaigns SET ${fields.join(', ')} WHERE id = ? AND business_id = ?`,
+      args,
+    })
+  }
+
+  if (payload.friendConfig) {
+    await replaceFriendReward(existing.id, payload.friendConfig)
+  }
+
+  return getCampaignForBusiness(userId, existing.id)
 }
 
 async function updateStampCampaign(
@@ -1493,7 +2972,10 @@ export async function listBusinessesWithActiveCampaigns() {
           INNER JOIN campaigns c ON c.business_id = b.id
           LEFT JOIN branches br ON br.business_id = b.id AND br.is_primary = 1
           WHERE c.status = 'active'
-            AND c.start_date <= ?
+            AND (
+              c.end_date >= ?
+              OR c.mechanic = 'stamp'
+            )
           ORDER BY b.name ASC`,
     args: [today],
   })
@@ -1504,20 +2986,25 @@ export async function listBusinessesWithActiveCampaigns() {
 
   function isCampaignRowVisible(c: Record<string, unknown>, day: string): boolean {
     const mechanic = c.mechanic as string
+    const startDate = c.start_date as string
+    const endDate = c.end_date as string
+    const endTime = (c.end_time as string) ?? '23:59'
     if (mechanic === 'stamp') {
+      // Upcoming stamp cards stay visible before enrollment opens.
+      if (day < startDate) return day <= endDate
       return isStampCampaignActive(
         'active',
-        c.start_date as string,
-        c.end_date as string,
+        startDate,
+        endDate,
         Number(c.claim_period_days ?? 30),
         (c.cap_filled_at as string) ?? null,
         day,
       )
     }
-    if (mechanic === 'check-in-loyalty') {
-      return day >= (c.start_date as string) && day <= (c.end_date as string)
-    }
-    return day <= (c.end_date as string)
+    // Hide as soon as end_date + end_time has passed.
+    if (isPastCampaignEndMoment(endDate, endTime)) return false
+    // Include not-yet-started campaigns through their schedule end.
+    return day <= endDate
   }
 
   function mapCampaignListItem(c: Record<string, unknown>) {
@@ -1531,6 +3018,8 @@ export async function listBusinessesWithActiveCampaigns() {
       mechanic: c.mechanic as string,
       startDate: c.start_date as string,
       endDate: c.end_date as string,
+      startTime: (c.start_time as string) ?? '00:00',
+      endTime: (c.end_time as string) ?? '23:59',
       winRatePercent: userCap > 0 ? Math.round((overallWinners / userCap) * 100) : winRate,
       overallWinners,
       userCap,
@@ -1544,11 +3033,16 @@ export async function listBusinessesWithActiveCampaigns() {
 
   const placeholders = businessIds.map(() => '?').join(', ')
   const campaignsResult = await db.execute({
-    sql: `SELECT id, business_id, name, mechanic, start_date, end_date, user_cap, per_day_user_limit,
+    sql: `SELECT id, business_id, name, mechanic, start_date, end_date, start_time, end_time,
+                 user_cap, per_day_user_limit,
                  win_rate_percent, plays_per_day, overall_winners,
                  claim_period_days, cap_filled_at, config_json
           FROM campaigns
-          WHERE business_id IN (${placeholders}) AND status = 'active' AND start_date <= ?`,
+          WHERE business_id IN (${placeholders}) AND status = 'active'
+            AND (
+              end_date >= ?
+              OR mechanic = 'stamp'
+            )`,
     args: [...businessIds, today],
   })
 
@@ -1611,8 +3105,11 @@ export async function getPublicCampaign(campaignId: string) {
           WHERE c.id = ?`,
     args: [campaignId],
   })
-  const row = result.rows[0] as Record<string, unknown> | undefined
-  if (!row) throw new Error('CAMPAIGN_NOT_FOUND')
+  const rowRaw = result.rows[0] as Record<string, unknown> | undefined
+  if (!rowRaw) throw new Error('CAMPAIGN_NOT_FOUND')
+
+  // Flip status when end_date + end_time have passed (stamp uses claim deadline).
+  const row = await ensureCampaignNotPastEnd(rowRaw)
 
   const [statsMap, rewardsMap] = await Promise.all([
     fetchCampaignStatsBatch([campaignId]),
@@ -1649,6 +3146,7 @@ export async function getPublicCampaign(campaignId: string) {
   }
 
   if (campaign.mechanic === 'stamp') {
+    const upcoming = today < campaign.startDate && today <= campaign.endDate && campaign.status === 'active'
     const active = isStampCampaignActive(
       campaign.status,
       campaign.startDate,
@@ -1657,7 +3155,7 @@ export async function getPublicCampaign(campaignId: string) {
       campaign.capFilledAt,
       today,
     )
-    if (!active) throw new Error('CAMPAIGN_NOT_ACTIVE')
+    if (!upcoming && !active) throw new Error('CAMPAIGN_NOT_ACTIVE')
 
     const meta = parseStampCampaignMeta({
       config_json: campaign.configJson,
@@ -1673,6 +3171,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       claimPeriodDays: campaign.claimPeriodDays,
@@ -1691,7 +3191,8 @@ export async function getPublicCampaign(campaignId: string) {
     if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
     const startTime = (row.start_time as string) ?? '00:00'
     const endTime = (row.end_time as string) ?? '23:59'
-    if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
       throw new Error('CAMPAIGN_NOT_ACTIVE')
     }
 
@@ -1706,6 +3207,8 @@ export async function getPublicCampaign(campaignId: string) {
       mechanic: campaign.mechanic,
       startDate: campaign.startDate,
       endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
       userCap: campaign.userCap,
       currentUsers: campaign.currentUsers,
       checkInConfig,
@@ -1719,12 +3222,261 @@ export async function getPublicCampaign(campaignId: string) {
     }
   }
 
+  if (campaign.mechanic === 'lottery') {
+    const lotteryConfig = parseLotteryConfig(campaign.configJson)
+    if (!lotteryConfig) throw new Error('INVALID_LOTTERY_CONFIG')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    const { isLotteryCampaignActive } = await import('./lottery-service.js')
+    const upcoming = today < campaign.startDate && today <= campaign.endDate && campaign.status === 'active'
+    const active = isLotteryCampaignActive(
+      campaign.status,
+      campaign.startDate,
+      campaign.endDate,
+      startTime,
+      endTime,
+      Boolean(lotteryConfig.drawCompleted),
+    )
+    if (!upcoming && !active) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
+      drawDate: campaign.endDate,
+      currentUsers: campaign.currentUsers,
+      lotteryConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+        tier: r.rewardTier,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'buy-x-get-y') {
+    const buyXGetYConfig = parseBuyXGetYConfig(campaign.configJson)
+    if (!buyXGetYConfig) throw new Error('INVALID_BUY_X_GET_Y_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      buyXGetYConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'coupon') {
+    const couponConfig = parseCouponConfig(campaign.configJson)
+    if (!couponConfig) throw new Error('INVALID_COUPON_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      couponConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'flash') {
+    const flashConfig = parseFlashConfig(campaign.configJson)
+    if (!flashConfig) throw new Error('INVALID_FLASH_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      flashConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'combo') {
+    const comboConfig = parseComboConfig(campaign.configJson)
+    if (!comboConfig) throw new Error('INVALID_COMBO_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      comboConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'groupunlock') {
+    const groupUnlockConfig = parseGroupUnlockConfig(campaign.configJson)
+    if (!groupUnlockConfig) throw new Error('INVALID_GROUPUNLOCK_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      groupUnlockConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
+  if (campaign.mechanic === 'friend') {
+    const friendConfig = parseFriendConfig(campaign.configJson)
+    if (!friendConfig) throw new Error('INVALID_FRIEND_CONFIG')
+    if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
+    const startTime = (row.start_time as string) ?? '00:00'
+    const endTime = (row.end_time as string) ?? '23:59'
+    // Public fetch is allowed before start; play/claim still gated by isCampaignInWindow.
+    if (today > campaign.endDate) {
+      throw new Error('CAMPAIGN_NOT_ACTIVE')
+    }
+
+    return {
+      id: campaign.id,
+      businessId: campaign.businessId,
+      businessName: campaign.businessName,
+      name: campaign.name,
+      mechanic: campaign.mechanic,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      startTime: (row.start_time as string) ?? '00:00',
+      endTime: (row.end_time as string) ?? '23:59',
+      userCap: campaign.userCap,
+      currentUsers: campaign.currentUsers,
+      friendConfig,
+      rewards: rewards.map(r => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+      })),
+    }
+  }
+
   if (campaign.status !== 'active') throw new Error('CAMPAIGN_NOT_ACTIVE')
   const startTime = (row.start_time as string) ?? '00:00'
   const endTime = (row.end_time as string) ?? '23:59'
-  if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+  // Public fetch is allowed before start; play still gated by isCampaignInWindow / checkEligibility.
+  if (today > campaign.endDate) {
     throw new Error('CAMPAIGN_NOT_ACTIVE')
   }
+
+  const spinConfig = campaign.mechanic === 'spin'
+    ? parseSpinConfig(campaign.configJson)
+    : null
+  const diceConfig = campaign.mechanic === 'dice'
+    ? parseDiceConfig(campaign.configJson)
+    : null
+
   return {
     id: campaign.id,
     businessId: campaign.businessId,
@@ -1733,9 +3485,13 @@ export async function getPublicCampaign(campaignId: string) {
     mechanic: campaign.mechanic,
     startDate: campaign.startDate,
     endDate: campaign.endDate,
+    startTime,
+    endTime,
     playsPerDay: campaign.playsPerDay,
     winRatePercent: campaign.winRatePercent,
     overallWinners: campaign.overallWinners,
+    ...(spinConfig ? { spinConfig } : {}),
+    ...(diceConfig ? { diceConfig } : {}),
     rewards: rewards.map(r => ({
       id: r.id,
       name: r.name,
@@ -1904,12 +3660,15 @@ export async function checkEligibility(
   const startTime = campaign.startTime ?? '00:00'
   const endTime = campaign.endTime ?? '23:59'
   if (!isCampaignInWindow(campaign.startDate, campaign.endDate, startTime, endTime)) {
+    const notStartedYet = isBeforeCampaignStart(campaign.startDate, startTime)
     return {
       ...base,
       canPlay: false,
       playsRemaining: 0,
       playsUsedToday: 0,
-      message: 'Campaign is not running today',
+      message: notStartedYet
+        ? campaignLiveOnMessage(campaign.startDate, startTime)
+        : outsideActiveHoursMessage(startTime, endTime),
       isNewParticipant: false,
       blockReason: 'campaign_inactive',
     }
@@ -2059,13 +3818,16 @@ export async function executeShakePlay(
   }
 
   const campaign = await getCampaignById(campaignId)
+  if (campaign.mechanic !== 'shake' && campaign.mechanic !== 'spin' && campaign.mechanic !== 'dice') {
+    throw new Error('INVALID_MECHANIC')
+  }
   const eligibility = await checkEligibility(campaign, customerId)
   if (!eligibility.canPlay) {
     const msg = eligibility.message
     throw new Error(
       msg === 'Campaign user cap reached' ? 'USER_CAP_REACHED' :
       msg.includes('Daily') ? 'DAILY_LIMIT_REACHED' :
-      msg === 'Campaign is not active' || msg === 'Campaign is not running today' ? 'CAMPAIGN_NOT_ACTIVE' :
+      msg === 'Campaign is not active' || msg === 'Campaign is not running today' || msg.startsWith('Today · Active Hours') || msg.startsWith('Live on ') ? 'CAMPAIGN_NOT_ACTIVE' :
       'NO_PLAYS_REMAINING',
     )
   }
@@ -2113,9 +3875,9 @@ export async function executeShakePlay(
 
   statements.push({
     sql: `INSERT INTO game_plays (id, campaign_id, customer_id, mechanic, won, reward_id, reward_name, redemption_code)
-          VALUES (?, ?, ?, 'shake', ?, ?, ?, ?)`,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      playId, campaignId, customerId,
+      playId, campaignId, customerId, campaign.mechanic,
       won ? 1 : 0,
       reward?.id ?? null,
       reward?.name ?? null,
@@ -2160,30 +3922,97 @@ export async function executeShakePlay(
 }
 
 export async function listCustomerRewards(customerId: string) {
+  const { maybeUnlockGroupRewards, getGroupUnlockProgress } = await import('./groupunlock-progress.js')
+
   const result = await db.execute({
     sql: `SELECT cr.*,
                  COALESCE(c.name, 'Rewards') as campaign_name,
-                 COALESCE(c.mechanic, 'points_claim') as mechanic
+                 COALESCE(c.mechanic, 'points_claim') as mechanic,
+                 c.end_date AS draw_date,
+                 lt.ticket_number, lt.serial_code, lt.status AS ticket_status, lt.result_viewed_at
           FROM customer_rewards cr
           LEFT JOIN campaigns c ON c.id = cr.campaign_id
+          LEFT JOIN lottery_tickets lt ON lt.id = cr.play_id
           WHERE cr.customer_id = ?
           ORDER BY cr.earned_at DESC`,
     args: [customerId],
   })
 
+  // Unlock any group offers that have hit their target before we map statuses
+  const groupCampaignIds = new Set<string>()
+  for (const row of result.rows) {
+    if (row.mechanic === 'groupunlock' && row.campaign_id) {
+      groupCampaignIds.add(row.campaign_id as string)
+    }
+  }
+  for (const campaignId of groupCampaignIds) {
+    await maybeUnlockGroupRewards(campaignId)
+  }
+
+  // Re-fetch statuses after possible unlocks
+  const refreshed = groupCampaignIds.size > 0
+    ? await db.execute({
+        sql: `SELECT cr.*,
+                     COALESCE(c.name, 'Rewards') as campaign_name,
+                     COALESCE(c.mechanic, 'points_claim') as mechanic,
+                     c.end_date AS draw_date,
+                     lt.ticket_number, lt.serial_code, lt.status AS ticket_status, lt.result_viewed_at
+              FROM customer_rewards cr
+              LEFT JOIN campaigns c ON c.id = cr.campaign_id
+              LEFT JOIN lottery_tickets lt ON lt.id = cr.play_id
+              WHERE cr.customer_id = ?
+              ORDER BY cr.earned_at DESC`,
+        args: [customerId],
+      })
+    : result
+
+  const progressByCampaign = new Map<string, Awaited<ReturnType<typeof getGroupUnlockProgress>>>()
+  for (const campaignId of groupCampaignIds) {
+    progressByCampaign.set(campaignId, await getGroupUnlockProgress(campaignId))
+  }
+
   const expiredIds: string[] = []
-  const rows = result.rows.map(row => {
+  const rows = refreshed.rows.map(row => {
     const redeemExpiresAt = (row.redeem_expires_at as string) ?? null
     let status = row.status as string
-    if (status === 'earned' && isCustomerRewardExpired(redeemExpiresAt)) {
+    if (
+      (status === 'earned' || status === 'pending' || status === 'group_pending')
+      && isCustomerRewardExpired(redeemExpiresAt)
+    ) {
       status = 'expired'
       expiredIds.push(row.id as string)
     }
+    const mechanic = row.mechanic as string
+    const lottery = mechanic === 'lottery' || row.source_type === 'lottery_ticket'
+      ? {
+          ticketNumber: row.ticket_number != null ? Number(row.ticket_number) : null,
+          serialCode: (row.serial_code as string) ?? null,
+          drawDate: (row.draw_date as string) ?? null,
+          ticketStatus: (row.ticket_status as string) ?? null,
+          hasViewedResult: Boolean(row.result_viewed_at),
+        }
+      : undefined
+    const campaignId = row.campaign_id as string
+    const groupUnlock =
+      mechanic === 'groupunlock' || row.source_type === 'groupunlock'
+        ? (() => {
+            const progress = progressByCampaign.get(campaignId)
+            return progress
+              ? {
+                  targetParticipants: progress.targetParticipants,
+                  groupJoined: progress.groupJoined,
+                  peopleLeft: progress.peopleLeft,
+                  unlocked: progress.unlocked || status === 'earned' || status === 'pending' || status === 'redeemed',
+                }
+              : undefined
+          })()
+        : undefined
     return {
       id: row.id as string,
-      campaignId: row.campaign_id as string,
+      campaignId,
+      businessId: (row.business_id as string) ?? null,
       campaignName: row.campaign_name as string,
-      mechanic: row.mechanic as string,
+      mechanic,
       reward: row.reward_name as string,
       icon: (row.icon as string) ?? '🎁',
       earnedAt: row.earned_at as string,
@@ -2192,13 +4021,15 @@ export async function listCustomerRewards(customerId: string) {
       redeemedAt: (row.redeemed_at as string) ?? undefined,
       code: row.redemption_code as string,
       redeemBefore: redeemExpiresAt,
+      ...(lottery ? { lottery } : {}),
+      ...(groupUnlock ? { groupUnlock } : {}),
     }
   })
 
   if (expiredIds.length > 0) {
     const placeholders = expiredIds.map(() => '?').join(', ')
     await db.execute({
-      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id IN (${placeholders}) AND status = 'earned'`,
+      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id IN (${placeholders}) AND status IN ('earned', 'pending', 'group_pending')`,
       args: expiredIds,
     })
   }
@@ -2218,11 +4049,12 @@ export async function requestCustomerRedemption(customerId: string, rewardId: st
   if (status === 'redeemed') throw new Error('ALREADY_REDEEMED')
   if (status === 'expired' || isCustomerRewardExpired((row.redeem_expires_at as string) ?? null)) {
     await db.execute({
-      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id = ? AND status = 'earned'`,
+      sql: `UPDATE customer_rewards SET status = 'expired' WHERE id = ? AND status IN ('earned', 'pending', 'group_pending')`,
       args: [rewardId],
     })
     throw new Error('REWARD_EXPIRED')
   }
+  if (status === 'group_pending') throw new Error('GROUP_NOT_UNLOCKED')
   if (status !== 'earned') throw new Error('INVALID_STATUS')
 
   await db.execute({

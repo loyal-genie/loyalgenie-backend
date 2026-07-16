@@ -31,6 +31,36 @@ import {
   listCustomerLoyaltyProfiles,
 } from '../services/check-in-loyalty.js'
 import { getBusinessCampaignStates } from '../services/business-campaign-states.js'
+import {
+  claimLotteryTicket,
+  claimLotteryWinToWallet,
+  getLotteryState,
+  viewLotteryResult,
+} from '../services/lottery-service.js'
+import {
+  claimBuyXGetYReward,
+  getBuyXGetYState,
+} from '../services/buy-x-get-y-service.js'
+import {
+  claimCouponReward,
+  getCouponState,
+} from '../services/coupon-service.js'
+import {
+  claimFlashReward,
+  getFlashState,
+} from '../services/flash-service.js'
+import {
+  claimComboReward,
+  getComboState,
+} from '../services/combo-service.js'
+import {
+  claimGroupUnlockReward,
+  getGroupUnlockState,
+} from '../services/groupunlock-service.js'
+import {
+  claimFriendReward,
+  getFriendState,
+} from '../services/friend-service.js'
 
 const router = Router()
 
@@ -39,7 +69,7 @@ const router = Router()
 router.get('/public/businesses', async (_req, res) => {
   try {
     const businesses = await listBusinessesWithActiveCampaigns()
-    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=120')
+    res.set('Cache-Control', 'public, max-age=0, must-revalidate')
     res.json({ success: true, data: businesses })
   } catch (err) {
     console.error(err)
@@ -81,6 +111,12 @@ router.post('/customer/rewards/:id/request-redemption', requireCustomerAuth, asy
     }
     if (message === 'ALREADY_REDEEMED') {
       return res.status(409).json({ error: 'Reward already redeemed' })
+    }
+    if (message === 'REWARD_EXPIRED') {
+      return res.status(410).json({ error: 'Reward has expired' })
+    }
+    if (message === 'GROUP_NOT_UNLOCKED') {
+      return res.status(403).json({ error: 'Group offer is not unlocked yet — more people need to reserve' })
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to request redemption' })
@@ -149,6 +185,22 @@ router.post('/', requireAuth, async (req, res) => {
     }
     if (message === 'OVERALL_WINNERS_EXCEEDS_USER_CAP') {
       return res.status(422).json({ error: 'Overall winners cannot exceed user cap' })
+    }
+    if (message === 'INVALID_SPIN_CONFIG' || message === 'SEGMENT_PROBABILITIES_MUST_SUM_100' || message === 'INVALID_SPIN_REDEEM') {
+      return res.status(422).json({
+        error: message === 'SEGMENT_PROBABILITIES_MUST_SUM_100'
+          ? 'Wheel segment shares must sum to exactly 100%'
+          : 'Invalid spin wheel configuration',
+      })
+    }
+    if (message === 'INVALID_DICE_CONFIG' || message === 'INVALID_DICE_REDEEM') {
+      return res.status(422).json({ error: 'Invalid dice configuration — add at least one winning face with a reward' })
+    }
+    if (message === 'INVALID_LOTTERY_CONFIG' || message === 'INVALID_LOTTERY_REDEEM') {
+      return res.status(422).json({ error: 'Invalid lottery configuration — add jackpot and redeem-before settings' })
+    }
+    if (message === 'INVALID_BUY_X_GET_Y_CONFIG' || message === 'INVALID_BUY_X_GET_Y_REDEEM') {
+      return res.status(422).json({ error: 'Invalid Buy X Get Y configuration — check trigger, reward, and redeem-before' })
     }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL' || message === 'INVALID_LOYALTY_MILESTONES') {
       return res.status(422).json({ error: message === 'INVALID_LOYALTY_MILESTONES' ? 'Milestone point thresholds must be unique' : 'Invalid stamp card configuration' })
@@ -232,6 +284,22 @@ router.patch('/:id', requireAuth, async (req, res) => {
     }
     if (message === 'REWARD_SHARES_MUST_SUM_100') {
       return res.status(422).json({ error: 'Reward shares must sum to exactly 100%' })
+    }
+    if (message === 'INVALID_SPIN_CONFIG' || message === 'SEGMENT_PROBABILITIES_MUST_SUM_100' || message === 'INVALID_SPIN_REDEEM') {
+      return res.status(422).json({
+        error: message === 'SEGMENT_PROBABILITIES_MUST_SUM_100'
+          ? 'Wheel segment shares must sum to exactly 100%'
+          : 'Invalid spin wheel configuration',
+      })
+    }
+    if (message === 'INVALID_DICE_CONFIG' || message === 'INVALID_DICE_REDEEM') {
+      return res.status(422).json({ error: 'Invalid dice configuration — add at least one winning face with a reward' })
+    }
+    if (message === 'INVALID_LOTTERY_CONFIG' || message === 'INVALID_LOTTERY_REDEEM') {
+      return res.status(422).json({ error: 'Invalid lottery configuration — add jackpot and redeem-before settings' })
+    }
+    if (message === 'INVALID_BUY_X_GET_Y_CONFIG' || message === 'INVALID_BUY_X_GET_Y_REDEEM') {
+      return res.status(422).json({ error: 'Invalid Buy X Get Y configuration — check trigger, reward, and redeem-before' })
     }
     if (message === 'INVALID_STAMP_CONFIG' || message === 'INVALID_STAMP_REWARDS' || message === 'INVALID_STAMP_POOL') {
       return res.status(422).json({ error: 'Invalid stamp card configuration' })
@@ -421,6 +489,327 @@ router.post('/:id/check-in', requireCustomerAuth, async (req, res) => {
     }
     console.error(err)
     res.status(500).json({ error: 'Failed to check in' })
+  }
+})
+
+router.get('/:id/lottery-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getLotteryState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_LOTTERY_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get lottery state' })
+  }
+})
+
+router.post('/:id/lottery/claim-ticket', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimLotteryTicket(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'TICKET_ALREADY_CLAIMED' || message === 'NO_PLAYS_REMAINING') {
+      return res.status(403).json({ error: 'No ticket claims left today. Come back tomorrow or check status.' })
+    }
+    if (message === 'DRAW_ALREADY_COMPLETED') {
+      return res.status(403).json({ error: 'Draw has already completed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim ticket' })
+  }
+})
+
+router.post('/lottery/tickets/:ticketId/claim-win', requireCustomerAuth, async (req, res) => {
+  try {
+    const result = await claimLotteryWinToWallet(req.user!.id, String(req.params.ticketId))
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_WIN_FAILED'
+    if (message === 'TICKET_NOT_FOUND') {
+      return res.status(404).json({ error: 'Ticket not found' })
+    }
+    if (message === 'TICKET_NOT_WON' || message === 'PRIZE_MISSING') {
+      return res.status(422).json({ error: 'This ticket cannot be claimed to wallet yet' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim win to wallet' })
+  }
+})
+
+router.post('/customer/rewards/:id/view-lottery-result', requireCustomerAuth, async (req, res) => {
+  try {
+    const result = await viewLotteryResult(req.user!.id, String(req.params.id))
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'VIEW_FAILED'
+    if (message === 'REWARD_NOT_FOUND') {
+      return res.status(404).json({ error: 'Reward not found' })
+    }
+    if (message === 'NOT_LOTTERY_REWARD' || message === 'INVALID_STATUS') {
+      return res.status(422).json({ error: 'Cannot update this reward status' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to update lottery result' })
+  }
+})
+
+router.get('/:id/buy-x-get-y-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getBuyXGetYState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_BUY_X_GET_Y_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get offer state' })
+  }
+})
+
+router.post('/:id/buy-x-get-y/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimBuyXGetYReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this offer' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All spots have been claimed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim reward' })
+  }
+})
+
+router.get('/:id/coupon-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getCouponState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_COUPON_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get coupon state' })
+  }
+})
+
+router.post('/:id/coupon/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimCouponReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this coupon' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All coupons have been claimed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim coupon' })
+  }
+})
+
+router.get('/:id/flash-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getFlashState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_FLASH_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get flash deal state' })
+  }
+})
+
+router.post('/:id/flash/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimFlashReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this flash deal' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All spots have been claimed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim flash deal' })
+  }
+})
+
+router.get('/:id/combo-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getComboState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_COMBO_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get combo deal state' })
+  }
+})
+
+router.post('/:id/combo/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimComboReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this combo deal' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All combo spots have been claimed' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim combo deal' })
+  }
+})
+
+router.get('/:id/groupunlock-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getGroupUnlockState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_GROUPUNLOCK_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get community offer state' })
+  }
+})
+
+router.post('/:id/groupunlock/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimGroupUnlockReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this community offer' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All spots have been reserved' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim community offer' })
+  }
+})
+
+router.get('/:id/friend-state', requireCustomerAuth, async (req, res) => {
+  try {
+    const state = await getFriendState(String(req.params.id), req.user!.id)
+    res.json({ success: true, data: state })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'STATE_FAILED'
+    if (message === 'CAMPAIGN_NOT_FOUND' || message === 'NOT_FRIEND_CAMPAIGN') {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to get bring a friend state' })
+  }
+})
+
+router.post('/:id/friend/claim', requireCustomerAuth, async (req, res) => {
+  try {
+    const playSessionToken = String(req.body?.playSessionToken ?? '')
+    if (!playSessionToken) {
+      return res.status(422).json({ error: 'Play session required. Enter PIN first.' })
+    }
+    const result = await claimFriendReward(String(req.params.id), req.user!.id, playSessionToken)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'CLAIM_FAILED'
+    if (message === 'INVALID_PLAY_SESSION') {
+      return res.status(401).json({ error: 'Session expired. Enter PIN again.' })
+    }
+    if (message === 'ALREADY_CLAIMED') {
+      return res.status(403).json({ error: 'You already claimed this offer' })
+    }
+    if (message === 'USER_CAP_REACHED') {
+      return res.status(403).json({ error: 'All claims taken' })
+    }
+    if (message === 'CAMPAIGN_NOT_ACTIVE') {
+      return res.status(403).json({ error: 'Campaign is not active' })
+    }
+    console.error(err)
+    res.status(500).json({ error: 'Failed to claim bring a friend reward' })
   }
 })
 

@@ -1,9 +1,10 @@
 import { db } from '../db/client.js'
-import { todayInCampaignTz, istDateSql } from '../utils/campaign-dates.js'
+import { todayInCampaignTz, istDateSql, isPastCampaignEndMoment } from '../utils/campaign-dates.js'
 import {
   fetchCampaignStatsBatch,
   checkEligibility,
   mapRowToCampaignLite,
+  autoEndExpiredCampaigns,
 } from './campaigns.js'
 import {
   parseStampCampaignMeta,
@@ -17,6 +18,42 @@ import {
   parseCheckInConfig,
   fetchMilestoneRewardsBatch,
 } from './check-in-loyalty.js'
+import { parseLotteryConfig } from './lottery-campaign-schema.js'
+import { isLotteryCampaignActive } from './lottery-service.js'
+import { parseBuyXGetYConfig, formatBuyXGetYRewardLabel } from './buy-x-get-y-campaign-schema.js'
+import { parseCouponConfig, formatCouponRewardLabel } from './coupon-campaign-schema.js'
+import { parseFlashConfig, formatFlashRewardLabel } from './flash-campaign-schema.js'
+import { parseComboConfig, formatComboRewardLabel } from './combo-campaign-schema.js'
+import { parseGroupUnlockConfig, formatGroupUnlockRewardLabel } from './groupunlock-campaign-schema.js'
+import { parseFriendConfig, formatFriendRewardLabel } from './friend-campaign-schema.js'
+import { parseSpinConfig } from './spin-campaign-schema.js'
+import { parseDiceConfig } from './dice-campaign-schema.js'
+import { isCampaignInWindow } from '../utils/campaign-dates.js'
+import { formatListingRedeemBefore } from '../utils/redeem-listing-label.js'
+
+type RedeemableConfig = {
+  redeemExpiryMode?: 'fixed' | 'relative'
+  redeemFixedDate?: string | null
+  redeemRelativeAmount?: number | null
+  redeemRelativeUnit?: 'day' | 'week' | 'month' | null
+}
+
+function listingRedeemBefore(config: RedeemableConfig): string | null {
+  return formatListingRedeemBefore(config)
+}
+
+function uniquePrizeLabels(labels: string[], limit = 3): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of labels) {
+    const label = raw.trim()
+    if (!label || seen.has(label)) continue
+    seen.add(label)
+    out.push(label)
+    if (out.length >= limit) break
+  }
+  return out
+}
 
 export interface BusinessCampaignStateItem {
   campaignId: string
@@ -40,33 +77,110 @@ async function batchDailyNewUsers(campaignIds: string[], today: string): Promise
   return map
 }
 
+/** Users who collected a stamp today — stamp cards don't always update campaign_participations. */
+async function batchStampPlayingToday(campaignIds: string[], today: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  if (campaignIds.length === 0) return map
+  const placeholders = campaignIds.map(() => '?').join(', ')
+  const result = await db.execute({
+    sql: `SELECT campaign_id, COUNT(*) AS c FROM stamp_cards
+          WHERE campaign_id IN (${placeholders}) AND last_stamp_date = ?
+          GROUP BY campaign_id`,
+    args: [...campaignIds, today],
+  })
+  for (const row of result.rows) {
+    map.set(row.campaign_id as string, Number(row.c ?? 0))
+  }
+  return map
+}
+
+/** Users who played today (last_play_date), for card social proof. */
+async function batchPlayingToday(campaignIds: string[], today: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  if (campaignIds.length === 0) return map
+  const placeholders = campaignIds.map(() => '?').join(', ')
+  const result = await db.execute({
+    sql: `SELECT campaign_id, COUNT(*) AS c FROM campaign_participations
+          WHERE campaign_id IN (${placeholders}) AND last_play_date = ?
+          GROUP BY campaign_id`,
+    args: [...campaignIds, today],
+  })
+  for (const row of result.rows) {
+    map.set(row.campaign_id as string, Number(row.c ?? 0))
+  }
+  return map
+}
+
 export async function getBusinessCampaignStates(
   businessId: string,
   customerId: string,
 ): Promise<BusinessCampaignStateItem[]> {
+  await autoEndExpiredCampaigns(businessId)
   const today = todayInCampaignTz()
   const result = await db.execute({
     sql: `SELECT * FROM campaigns
-          WHERE business_id = ? AND status = 'active' AND start_date <= ?`,
-    args: [businessId, today],
+          WHERE business_id = ?
+            AND (
+              end_date >= ?
+              OR mechanic = 'stamp'
+              OR (
+                mechanic = 'lottery'
+                AND status = 'ended'
+                AND id IN (
+                  SELECT DISTINCT campaign_id FROM lottery_tickets WHERE customer_id = ?
+                )
+              )
+            )
+            AND (
+              status = 'active'
+              OR (
+                mechanic = 'lottery'
+                AND status = 'ended'
+                AND id IN (
+                  SELECT DISTINCT campaign_id FROM lottery_tickets WHERE customer_id = ?
+                )
+              )
+            )`,
+    args: [businessId, today, customerId, customerId],
   })
-  const rows = result.rows as Record<string, unknown>[]
+  // Drop cards after end_date + end_time (SQL only knows calendar end_date).
+  // Keep stamp claim-window rows and ended lottery tickets the customer already holds.
+  const rows = (result.rows as Record<string, unknown>[]).filter((r) => {
+    const mechanic = r.mechanic as string
+    if (mechanic === 'stamp') return true
+    if (mechanic === 'lottery' && (r.status as string) === 'ended') return true
+    return !isPastCampaignEndMoment(
+      r.end_date as string,
+      (r.end_time as string) ?? '23:59',
+    )
+  })
   if (rows.length === 0) return []
 
   const ids = rows.map(r => r.id as string)
-  const shakeIds = rows.filter(r => r.mechanic === 'shake').map(r => r.id as string)
+  const shakeIds = rows.filter(r => r.mechanic === 'shake' || r.mechanic === 'spin' || r.mechanic === 'dice').map(r => r.id as string)
   const stampIds = rows.filter(r => r.mechanic === 'stamp').map(r => r.id as string)
   const loyaltyIds = rows.filter(r => r.mechanic === 'check-in-loyalty').map(r => r.id as string)
+  const lotteryIds = rows.filter(r => r.mechanic === 'lottery').map(r => r.id as string)
+  const couponIds = rows.filter(r => r.mechanic === 'coupon').map(r => r.id as string)
+  const flashIds = rows.filter(r => r.mechanic === 'flash').map(r => r.id as string)
+  const friendIds = rows.filter(r => r.mechanic === 'friend').map(r => r.id as string)
+  const comboIds = rows.filter(r => r.mechanic === 'combo').map(r => r.id as string)
+  const buyXGetYIds = rows.filter(r => r.mechanic === 'buy-x-get-y').map(r => r.id as string)
+  const groupUnlockIds = rows.filter(r => r.mechanic === 'groupunlock').map(r => r.id as string)
+  const claimOfferIds = [...couponIds, ...flashIds, ...friendIds, ...comboIds, ...buyXGetYIds]
+  const playingTodayIds = [...shakeIds, ...lotteryIds, ...loyaltyIds]
 
   const placeholders = ids.map(() => '?').join(', ')
 
-  const [statsMap, participations, dailyNewMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult] = await Promise.all([
+  const [statsMap, participations, dailyNewMap, playingTodayMap, stampPlayingTodayMap, stampCards, loyaltyCards, businessRow, milestoneMap, loyaltyRedeemedResult, lotteryTicketsResult, claimOfferRewardsResult, groupUnlockRewardsResult, shakeRewardRows] = await Promise.all([
     fetchCampaignStatsBatch(ids),
     db.execute({
       sql: `SELECT * FROM campaign_participations WHERE customer_id = ? AND campaign_id IN (${placeholders})`,
       args: [customerId, ...ids],
     }),
     batchDailyNewUsers(shakeIds, today),
+    batchPlayingToday(playingTodayIds, today),
+    batchStampPlayingToday(stampIds, today),
     stampIds.length > 0
       ? db.execute({
           sql: `SELECT * FROM stamp_cards WHERE customer_id = ? AND campaign_id IN (${stampIds.map(() => '?').join(', ')})`,
@@ -90,7 +204,49 @@ export async function getBusinessCampaignStates(
           args: [customerId, ...loyaltyIds],
         })
       : Promise.resolve({ rows: [] }),
+    lotteryIds.length > 0
+      ? db.execute({
+          sql: `SELECT * FROM lottery_tickets WHERE customer_id = ? AND campaign_id IN (${lotteryIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...lotteryIds],
+        })
+      : Promise.resolve({ rows: [] }),
+    claimOfferIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id, source_type FROM customer_rewards
+                WHERE customer_id = ?
+                  AND source_type IN ('coupon', 'flash', 'friend', 'combo', 'buy_x_get_y')
+                  AND campaign_id IN (${claimOfferIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...claimOfferIds],
+        })
+      : Promise.resolve({ rows: [] }),
+    groupUnlockIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id FROM customer_rewards
+                WHERE customer_id = ? AND source_type = 'groupunlock' AND campaign_id IN (${groupUnlockIds.map(() => '?').join(', ')})`,
+          args: [customerId, ...groupUnlockIds],
+        })
+      : Promise.resolve({ rows: [] }),
+    shakeIds.length > 0
+      ? db.execute({
+          sql: `SELECT campaign_id, name, icon FROM campaign_rewards
+                WHERE campaign_id IN (${shakeIds.map(() => '?').join(', ')})
+                ORDER BY campaign_id ASC, sort_order ASC`,
+          args: shakeIds,
+        })
+      : Promise.resolve({ rows: [] }),
   ])
+
+  const shakePrizesByCampaign = new Map<string, string[]>()
+  for (const row of shakeRewardRows.rows) {
+    const campaignId = row.campaign_id as string
+    const name = (row.name as string) ?? ''
+    const icon = ((row.icon as string) ?? '').trim()
+    const label = icon && !name.includes(icon) ? `${name} ${icon}`.trim() : name
+    if (!label) continue
+    const list = shakePrizesByCampaign.get(campaignId) ?? []
+    list.push(label)
+    shakePrizesByCampaign.set(campaignId, list)
+  }
 
   const stampExpireEntries = rows
     .filter(r => r.mechanic === 'stamp')
@@ -134,6 +290,33 @@ export async function getBusinessCampaignStates(
     }
   }
 
+  const lotteryTicketsByCampaign = new Map<string, Record<string, unknown>[]>()
+  for (const r of lotteryTicketsResult.rows) {
+    const cid = r.campaign_id as string
+    const list = lotteryTicketsByCampaign.get(cid) ?? []
+    list.push(r as Record<string, unknown>)
+    lotteryTicketsByCampaign.set(cid, list)
+  }
+
+  const couponClaimedSet = new Set<string>()
+  const flashClaimedSet = new Set<string>()
+  const friendClaimedSet = new Set<string>()
+  const comboClaimedSet = new Set<string>()
+  const buyXGetYClaimedSet = new Set<string>()
+  for (const r of claimOfferRewardsResult.rows) {
+    const cid = r.campaign_id as string
+    const source = r.source_type as string
+    if (source === 'coupon') couponClaimedSet.add(cid)
+    else if (source === 'flash') flashClaimedSet.add(cid)
+    else if (source === 'friend') friendClaimedSet.add(cid)
+    else if (source === 'combo') comboClaimedSet.add(cid)
+    else if (source === 'buy_x_get_y') buyXGetYClaimedSet.add(cid)
+  }
+
+  const groupUnlockClaimedSet = new Set(
+    groupUnlockRewardsResult.rows.map(r => r.campaign_id as string),
+  )
+
   const items: BusinessCampaignStateItem[] = []
 
   for (const row of rows) {
@@ -142,12 +325,38 @@ export async function getBusinessCampaignStates(
     const stats = statsMap.get(campaignId)!
     const campaign = mapRowToCampaignLite(row, stats.currentUsers)
 
-    if (mechanic === 'shake') {
+    if (mechanic === 'shake' || mechanic === 'spin' || mechanic === 'dice') {
       const eligibility = await checkEligibility(campaign, customerId, {
         participation: partMap.get(campaignId) ?? null,
         totalUsers: stats.currentUsers,
         dailyNewUsers: dailyNewMap.get(campaignId) ?? 0,
       })
+      let possibleRewards: string[] = []
+      if (mechanic === 'shake') {
+        possibleRewards = uniquePrizeLabels(shakePrizesByCampaign.get(campaignId) ?? [])
+      } else if (mechanic === 'spin') {
+        const spinConfig = parseSpinConfig(campaign.configJson)
+        possibleRewards = uniquePrizeLabels(
+          (spinConfig?.segments ?? [])
+            .filter(s => s.isWin)
+            .map(s => {
+              const text = (s.reward || s.label || '').trim()
+              const icon = (s.icon ?? '').trim()
+              return icon && text && !text.includes(icon) ? `${text} ${icon}` : text
+            }),
+        )
+      } else {
+        const diceConfig = parseDiceConfig(campaign.configJson)
+        possibleRewards = uniquePrizeLabels(
+          (diceConfig?.outcomes ?? [])
+            .filter(o => o.isWin)
+            .map(o => {
+              const text = (o.reward ?? '').trim()
+              const icon = (o.icon ?? '').trim()
+              return icon && text && !text.includes(icon) ? `${text} ${icon}` : text
+            }),
+        )
+      }
       items.push({
         campaignId,
         mechanic,
@@ -161,6 +370,8 @@ export async function getBusinessCampaignStates(
           blockReason: eligibility.blockReason,
           winRatePercent: campaign.winRatePercent,
           overallWinners: campaign.overallWinners,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
+          possibleRewards,
         },
       })
       continue
@@ -228,6 +439,7 @@ export async function getBusinessCampaignStates(
           cardComplete: card?.status === 'completed',
           userCap: campaign.userCap,
           currentUsers: campaign.currentUsers,
+          playingToday: stampPlayingTodayMap.get(campaignId) ?? 0,
         },
       })
       continue
@@ -267,7 +479,8 @@ export async function getBusinessCampaignStates(
           loyaltyPoints: points,
           totalCheckIns: Number(card?.total_check_ins ?? 0),
           pointsPerCheckIn: config.pointsPerCheckIn,
-          canCheckInToday: !checkedInToday && campaign.status === 'active',
+          canCheckInToday: !checkedInToday && campaign.status === 'active'
+            && today >= campaign.startDate && today <= campaign.endDate,
           checkedInToday,
           milestones: milestoneStates,
           nextMilestone: next
@@ -275,9 +488,263 @@ export async function getBusinessCampaignStates(
             : null,
           userCap: campaign.userCap,
           currentUsers: campaign.currentUsers,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
           campaignName: campaign.name,
           businessId: campaign.businessId,
           businessName,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'lottery') {
+      const config = parseLotteryConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const customerTickets = lotteryTicketsByCampaign.get(campaignId) ?? []
+      const latestTicket = customerTickets[customerTickets.length - 1]
+      const active = isLotteryCampaignActive(
+        campaign.status,
+        campaign.startDate,
+        campaign.endDate,
+        campaign.startTime,
+        campaign.endTime,
+        Boolean(config.drawCompleted),
+      )
+      const playsPerDay = Math.max(1, campaign.playsPerDay)
+      const participation = partMap.get(campaignId)
+      const lastPlayDate = (participation?.last_play_date as string) ?? ''
+      const playsUsedToday = lastPlayDate === today
+        ? Number(participation?.plays_today ?? 0)
+        : 0
+      const playsRemaining = Math.max(0, playsPerDay - playsUsedToday)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'lottery',
+          drawDate: campaign.endDate,
+          drawCompleted: Boolean(config.drawCompleted),
+          active,
+          canClaimTicket: active && playsRemaining > 0,
+          hasTicket: customerTickets.length > 0,
+          ticketCount: customerTickets.length,
+          playsPerDay,
+          playsUsedToday,
+          playsRemaining,
+          ticketNumber: latestTicket ? Number(latestTicket.ticket_number) : null,
+          ticketStatus: (latestTicket?.status as string) ?? null,
+          totalTickets: stats.currentUsers,
+          playingToday: playingTodayMap.get(campaignId) ?? 0,
+          prizeCount: config.prizes.length,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'buy-x-get-y') {
+      const config = parseBuyXGetYConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const hasClaimed = buyXGetYClaimedSet.has(campaignId)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'buy-x-get-y',
+          active,
+          canClaim: active && !hasClaimed && claimed < campaign.userCap,
+          hasClaimed,
+          claimedCount: claimed,
+          userCap: campaign.userCap,
+          spotsRemaining: Math.max(0, campaign.userCap - claimed),
+          rewardLabel: formatBuyXGetYRewardLabel(config),
+          endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
+          termsAndConditions: config.termsAndConditions,
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'coupon') {
+      const config = parseCouponConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const totalCoupons = config.totalCoupons
+      const hasClaimed = couponClaimedSet.has(campaignId)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'coupon',
+          active,
+          canClaim: active && !hasClaimed && claimed < totalCoupons,
+          hasClaimed,
+          claimedCount: claimed,
+          totalCoupons,
+          spotsRemaining: Math.max(0, totalCoupons - claimed),
+          rewardLabel: formatCouponRewardLabel(config),
+          termsAndConditions: config.termsAndConditions,
+          endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'flash') {
+      const config = parseFlashConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const totalSlots = config.totalSlots
+      const hasClaimed = flashClaimedSet.has(campaignId)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'flash',
+          active,
+          canClaim: active && !hasClaimed && claimed < totalSlots,
+          hasClaimed,
+          claimedCount: claimed,
+          totalSlots,
+          spotsRemaining: Math.max(0, totalSlots - claimed),
+          rewardLabel: formatFlashRewardLabel(config),
+          termsAndConditions: config.termsAndConditions,
+          endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'combo') {
+      const config = parseComboConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const totalSpots = config.totalSpots
+      const hasClaimed = comboClaimedSet.has(campaignId)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'combo',
+          active,
+          canClaim: active && !hasClaimed && claimed < totalSpots,
+          hasClaimed,
+          claimedCount: claimed,
+          totalSpots,
+          spotsRemaining: Math.max(0, totalSpots - claimed),
+          rewardLabel: formatComboRewardLabel(config),
+          termsAndConditions: config.termsAndConditions,
+          variant: config.variant,
+          items: config.items,
+          paidItems: config.paidItems,
+          freeItems: config.freeItems,
+          originalPrice: config.originalPrice,
+          bundlePrice: config.bundlePrice,
+          endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'groupunlock') {
+      const config = parseGroupUnlockConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const groupJoined = stats.currentUsers
+      const targetParticipants = config.targetParticipants
+      const hasClaimed = groupUnlockClaimedSet.has(campaignId)
+      const unlocked = groupJoined >= targetParticipants
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'groupunlock',
+          active,
+          canClaim: active && !hasClaimed && groupJoined < targetParticipants,
+          hasClaimed,
+          groupJoined,
+          targetParticipants,
+          claimedCount: groupJoined,
+          spotsRemaining: Math.max(0, targetParticipants - groupJoined),
+          unlocked,
+          rewardLabel: formatGroupUnlockRewardLabel(config),
+          endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
+        },
+      })
+      continue
+    }
+
+    if (mechanic === 'friend') {
+      const config = parseFriendConfig(campaign.configJson)
+      if (!config) {
+        items.push({ campaignId, mechanic, state: null })
+        continue
+      }
+      const active =
+        campaign.status === 'active' &&
+        isCampaignInWindow(campaign.startDate, campaign.endDate, campaign.startTime, campaign.endTime)
+      const claimed = stats.currentUsers
+      const userCap = campaign.userCap
+      const hasClaimed = friendClaimedSet.has(campaignId)
+      items.push({
+        campaignId,
+        mechanic,
+        state: {
+          campaignId,
+          mechanic: 'friend',
+          active,
+          canClaim: active && !hasClaimed && claimed < userCap,
+          hasClaimed,
+          claimedCount: claimed,
+          userCap,
+          spotsRemaining: Math.max(0, userCap - claimed),
+          minFriends: config.minFriends,
+          rewardLabel: formatFriendRewardLabel(config),
+          endDate: campaign.endDate,
+          redeemBefore: listingRedeemBefore(config),
         },
       })
       continue

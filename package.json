@@ -33,9 +33,14 @@
     "test:stamp:manual": "bash scripts/test-stamp-manual-user.sh",
     "sim:stamp:10d": "tsx scripts/sim-stamp-10-days.ts",
     "test:shake:e2e": "tsx scripts/test-shake-e2e-10-users.ts",
-    "test:loyalty:e2e": "tsx scripts/test-check-in-loyalty-e2e.ts",
-    "test:pin:boundary": "tsx scripts/test-pin-boundary.ts",
-    "test:customer:live": "tsx scripts/test-customer-live-e2e.ts"
+  "test:loyalty:e2e": "tsx scripts/test-check-in-loyalty-e2e.ts",
+  "test:pin:boundary": "tsx scripts/test-pin-boundary.ts",
+  "test:customer:live": "tsx scripts/test-customer-live-e2e.ts",
+  "test:redeem-expiry": "tsx scripts/test-redeem-expiry.ts",
+  "test:lottery:e2e": "tsx scripts/test-lottery-e2e.ts",
+  "test:lottery:new-flow": "tsx scripts/test-lottery-new-flow-e2e.ts",
+  "test:lottery:draw": "tsx scripts/trigger-lottery-draw.ts",
+  "test:lottery:same-day": "tsx scripts/test-lottery-same-day-window.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1075.0",
