@@ -1,4 +1,5 @@
 import { db } from '../db/client.js'
+import { computeRedeemExpiryDate } from '../utils/redeem-expiry.js'
 import { parseGroupUnlockConfig } from './groupunlock-campaign-schema.js'
 
 /** Promote all reserved spots to redeemable once the target is met. */
@@ -21,11 +22,21 @@ export async function maybeUnlockGroupRewards(campaignId: string): Promise<boole
   const joined = Number(claimedCount.rows[0]?.c ?? 0)
   if (joined < config.targetParticipants) return false
 
+  // Redeem-before clock starts at unlock (matches wallet appearance).
+  const redeemExpiresAt = computeRedeemExpiryDate(
+    config.redeemExpiryMode,
+    config.redeemFixedDate ?? null,
+    config.redeemRelativeAmount ?? 14,
+    config.redeemRelativeUnit ?? 'day',
+  )
+
   await db.execute({
     sql: `UPDATE customer_rewards
-          SET status = 'earned'
+          SET status = 'earned',
+              redeem_expires_at = COALESCE(?, redeem_expires_at),
+              earned_at = COALESCE(earned_at, datetime('now'))
           WHERE campaign_id = ? AND source_type = 'groupunlock' AND status = 'group_pending'`,
-    args: [campaignId],
+    args: [redeemExpiresAt, campaignId],
   })
   return true
 }
