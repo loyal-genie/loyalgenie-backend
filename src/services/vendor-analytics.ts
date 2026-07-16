@@ -454,8 +454,9 @@ async function computeVendorDashboardStats(
     return days <= 30
   }).length
 
+  // Current Users = presently active (last visit within window; all-time → last 30 days)
   const activeCustomers = windowDays === null
-    ? customers.length
+    ? activeCustomers30d
     : customers.filter(c => {
       if (!c.lastVisit) return false
       const days = Math.floor((Date.now() - new Date(c.lastVisit).getTime()) / 86400000)
