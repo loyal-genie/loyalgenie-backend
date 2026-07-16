@@ -69,7 +69,10 @@ router.get('/me/qr', requireAuth, async (req, res) => {
 
 router.get('/dashboard/stats', requireAuth, async (req, res) => {
   try {
-    const stats = await getVendorDashboardStats(req.user!.id)
+    const raw = typeof req.query.period === 'string' ? req.query.period : 'all'
+    const allowed = new Set(['all', '7d', 'month', '3m', 'year'])
+    const period = (allowed.has(raw) ? raw : 'all') as import('../services/vendor-analytics.js').VendorStatsPeriod
+    const stats = await getVendorDashboardStats(req.user!.id, period)
     res.json({ success: true, data: stats })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'STATS_FAILED'

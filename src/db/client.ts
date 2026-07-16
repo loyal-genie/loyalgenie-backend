@@ -47,6 +47,11 @@ export function convertSql(sql: string): string {
     /datetime\('now',\s*'\+(\d+) days'\)/gi,
     "NOW() + INTERVAL '$1 days'",
   )
+  // Parameterized SQLite offset (arg is e.g. '-7 days') → Postgres interval
+  converted = converted.replace(
+    /datetime\('now',\s*\?\)/gi,
+    '(NOW() + (?::interval))',
+  )
   converted = converted.replace(
     /datetime\('now'\)/gi,
     "to_char(NOW() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD\"T\"HH24:MI:SS')",

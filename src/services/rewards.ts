@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { computeRedeemExpiryDate, validateRedeemExpiryConfig } from '../utils/redeem-expiry.js'
 import { db } from '../db/client.js'
 import { getBusinessForUser } from './auth.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 import { nowInCampaignTz, todayInCampaignTz } from '../utils/campaign-dates.js'
 
 const rewardStatusSchema = z.enum(['active', 'expired', 'depleted'])
@@ -452,6 +453,8 @@ export async function claimCustomerBusinessReward(customerId: string, rewardId: 
       ],
     },
   ])
+
+  invalidateBusinessAnalyticsCaches(businessId)
 
   return {
     success: true,

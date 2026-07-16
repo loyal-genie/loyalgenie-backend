@@ -3,6 +3,7 @@ import { db } from '../db/client.js'
 import { todayInCampaignTz, isCampaignInWindow } from '../utils/campaign-dates.js'
 import { computeRedeemExpiryDate } from '../utils/redeem-expiry.js'
 import { verifyPlaySession } from './campaigns.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 import {
   formatComboDescription,
   formatComboRewardLabel,
@@ -182,6 +183,8 @@ export async function claimComboReward(
       args: [nanoid(), campaignId, customerId, today],
     },
   ])
+
+  invalidateBusinessAnalyticsCaches(businessId)
 
   return {
     rewardId,

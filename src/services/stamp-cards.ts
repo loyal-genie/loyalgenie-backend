@@ -13,6 +13,7 @@ import {
   type CampaignReward,
   type PinVerificationRow,
 } from './campaigns.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 import {
   stampConfigSchema,
   createStampCampaignSchema,
@@ -764,6 +765,8 @@ async function executeStampCollectInternal(
   if (statements.length > 0) {
     await db.batch(statements)
   }
+
+  invalidateBusinessAnalyticsCaches(businessId)
 
   const primaryTrigger = allTriggerOutcomes.find(t => t.won) ?? allTriggerOutcomes[0] ?? null
 

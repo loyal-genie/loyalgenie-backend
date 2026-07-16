@@ -131,7 +131,7 @@ import {
 } from './friend-campaign-schema.js'
 import { parsePhotoArray, resolveImageField, resolvePhotoArrayField } from '../utils/business-media.js'
 import { TtlCache } from '../utils/ttl-cache.js'
-import { invalidateVendorDashboardCache, invalidateVendorCustomersCache } from './vendor-analytics.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalgenie-dev-secret-change-in-prod'
 export const PIN_CYCLE_SECONDS = 120
@@ -631,8 +631,7 @@ export function invalidateCampaignsListCache(businessId?: string): void {
 
 function invalidateBusinessVendorCaches(businessId: string): void {
   invalidateCampaignsListCache(businessId)
-  invalidateVendorDashboardCache(businessId)
-  invalidateVendorCustomersCache(businessId)
+  invalidateBusinessAnalyticsCaches(businessId)
 }
 
 /** Batch-load participation / play / reward stats for many campaigns (list view). */
@@ -3902,6 +3901,8 @@ export async function executeShakePlay(
 
   await db.batch(statements)
 
+  invalidateBusinessVendorCaches(campaign.businessId)
+
   const playsRemaining = eligibility.playsRemaining - 1
   const playsUsedToday = eligibility.playsUsedToday + 1
 
@@ -4039,7 +4040,7 @@ export async function listCustomerRewards(customerId: string) {
 
 export async function requestCustomerRedemption(customerId: string, rewardId: string) {
   const check = await db.execute({
-    sql: `SELECT id, status, redeem_expires_at FROM customer_rewards WHERE id = ? AND customer_id = ?`,
+    sql: `SELECT id, status, redeem_expires_at, business_id FROM customer_rewards WHERE id = ? AND customer_id = ?`,
     args: [rewardId, customerId],
   })
   if (check.rows.length === 0) throw new Error('REWARD_NOT_FOUND')
@@ -4061,4 +4062,7 @@ export async function requestCustomerRedemption(customerId: string, rewardId: st
     sql: `UPDATE customer_rewards SET status = 'pending', requested_at = datetime('now') WHERE id = ?`,
     args: [rewardId],
   })
+
+  const businessId = row.business_id as string | null
+  if (businessId) invalidateBusinessVendorCaches(businessId)
 }
