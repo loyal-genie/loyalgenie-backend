@@ -1,7 +1,6 @@
 import { nanoid } from 'nanoid'
 import { db } from '../db/client.js'
 import { todayInCampaignTz, isCampaignInWindow } from '../utils/campaign-dates.js'
-import { computeRedeemExpiryDate } from '../utils/redeem-expiry.js'
 import { verifyPlaySession } from './campaigns.js'
 import {
   formatGroupUnlockDescription,
@@ -157,12 +156,7 @@ export async function claimGroupUnlockReward(
   const playId = nanoid()
   const redemptionCode = generateRedemptionCode()
   const rewardLabel = formatGroupUnlockRewardLabel(config)
-  const redeemExpiresAt = computeRedeemExpiryDate(
-    config.redeemExpiryMode,
-    config.redeemFixedDate ?? null,
-    config.redeemRelativeAmount ?? 14,
-    config.redeemRelativeUnit ?? 'day',
-  )
+  // Redeem window starts when the group unlocks — not at reservation.
   const today = todayInCampaignTz()
   const businessId = row.business_id as string
 
@@ -178,7 +172,7 @@ export async function claimGroupUnlockReward(
     {
       sql: `INSERT INTO customer_rewards
             (id, customer_id, campaign_id, play_id, reward_name, icon, redemption_code, status, earned_at, business_id, source_type, redeem_expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'group_pending', datetime('now'), ?, 'groupunlock', ?)`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'group_pending', datetime('now'), ?, 'groupunlock', NULL)`,
       args: [
         rewardId,
         customerId,
@@ -188,7 +182,6 @@ export async function claimGroupUnlockReward(
         (campaignReward.icon as string) ?? '🤝',
         redemptionCode,
         businessId,
-        redeemExpiresAt,
       ],
     },
     {
@@ -204,13 +197,23 @@ export async function claimGroupUnlockReward(
 
   const unlocked = await maybeUnlockGroupRewards(campaignId)
 
+  // After unlock, fetch redeem window if this claim completed the group.
+  let redeemBefore: string | null = null
+  if (unlocked) {
+    const unlockedRow = await db.execute({
+      sql: `SELECT redeem_expires_at FROM customer_rewards WHERE id = ?`,
+      args: [rewardId],
+    })
+    redeemBefore = (unlockedRow.rows[0]?.redeem_expires_at as string) ?? null
+  }
+
   return {
     rewardId,
     reward: rewardLabel,
     description: formatGroupUnlockDescription(config),
     offerSentence: formatGroupUnlockSentence(config),
     code: redemptionCode,
-    redeemBefore: redeemExpiresAt,
+    redeemBefore,
     icon: (campaignReward.icon as string) ?? '🤝',
     unlocked,
     groupJoined: joinedAfter,
