@@ -244,7 +244,8 @@ async function fetchCustomerSummaries(businessId: string): Promise<VendorCustome
         cu.created_at,
         MIN(gp.played_at) AS joined_at,
         MAX(gp.played_at) AS last_visit,
-        COUNT(gp.id) AS total_visits,
+        -- Distinct calendar days with ≥1 play (IST) — not play count
+        COUNT(DISTINCT ((gp.played_at)::timestamptz AT TIME ZONE 'Asia/Kolkata')::date) AS total_visits,
         COUNT(gp.id) AS games_played,
         SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END) AS rewards_earned,
         COALESCE(MAX(cr_agg.redeemed_count), 0) AS redeemed_count,
@@ -283,7 +284,8 @@ function computeSegment(c: VendorCustomerSummary): 'loyalist' | 'regular' | 'at-
   const days = Math.floor((Date.now() - new Date(c.lastVisit).getTime()) / 86400000)
   if (days > 45) return 'inactive'
   if (days > 14) return 'at-risk'
-  if (c.totalVisits >= 15) return 'loyalist'
+  // Engagement tier uses plays; visits are distinct days and stay separate
+  if (c.gamesPlayed >= 15) return 'loyalist'
   return 'regular'
 }
 
