@@ -97,6 +97,8 @@ export interface VendorDashboardStats {
   }
   atRiskCustomers: VendorCustomerSummary[]
   pendingRedemptions: number
+  /** Sum of each customer's distinct calendar visit-days in the selected period. */
+  totalVisits: number
   totalPlays: number
   totalWins: number
   totalRedeemed: number
@@ -316,6 +318,7 @@ async function queryWindowMetrics(
   shiftDays = 0,
 ): Promise<{
   uniquePlayers: number
+  totalVisits: number
   totalPlays: number
   totalWins: number
   totalRedeemed: number
@@ -346,6 +349,10 @@ async function queryWindowMetrics(
       sql: `
         SELECT
           COUNT(*) AS total_plays,
+          COUNT(DISTINCT (
+            gp.customer_id,
+            ((gp.played_at)::timestamptz AT TIME ZONE 'Asia/Kolkata')::date
+          )) AS total_visits,
           COALESCE(SUM(CASE WHEN gp.won = 1 THEN 1 ELSE 0 END), 0) AS total_wins,
           COUNT(DISTINCT gp.customer_id) AS unique_players
         FROM game_plays gp
@@ -384,6 +391,7 @@ async function queryWindowMetrics(
   const row = playsResult.rows[0] ?? {}
   return {
     uniquePlayers: Number(row.unique_players ?? 0),
+    totalVisits: Number(row.total_visits ?? 0),
     totalPlays: Number(row.total_plays ?? 0),
     totalWins: Number(row.total_wins ?? 0),
     totalRedeemed: Number(redeemResult.rows[0]?.redeemed_cnt ?? 0),
@@ -469,6 +477,7 @@ async function computeVendorDashboardStats(
       ? queryWindowMetrics(businessId, windowDays, windowDays)
       : Promise.resolve({
           uniquePlayers: 0,
+          totalVisits: 0,
           totalPlays: 0,
           totalWins: 0,
           totalRedeemed: 0,
@@ -570,6 +579,7 @@ async function computeVendorDashboardStats(
     segmentCounts,
     atRiskCustomers,
     pendingRedemptions,
+    totalVisits: current.totalVisits,
     totalPlays: current.totalPlays,
     totalWins: current.totalWins,
     totalRedeemed: current.totalRedeemed,
