@@ -7,6 +7,7 @@ import {
   isCampaignInWindow,
 } from '../utils/campaign-dates.js'
 import { verifyPlaySession } from './campaigns.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 import {
   parseLotteryConfig,
   serializeLotteryConfig,
@@ -292,6 +293,8 @@ export async function claimLotteryTicket(
 
   await db.batch(statements)
 
+  invalidateBusinessAnalyticsCaches(row.business_id as string)
+
   return {
     ticketId,
     ticketNumber,
@@ -367,6 +370,8 @@ export async function claimLotteryWinToWallet(customerId: string, ticketId: stri
       redeemExpiresAt,
     ],
   })
+
+  invalidateBusinessAnalyticsCaches(ticket.business_id as string)
 
   return {
     walletRewardId: rewardId,

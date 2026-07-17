@@ -157,8 +157,9 @@ async function start() {
   await ensureColumnPatches()
   startPinScheduler()
   startLotteryDrawScheduler()
-  app.listen(PORT, () => {
-    console.log(`LoyalGenie API running on http://localhost:${PORT}`)
+  // Render requires binding 0.0.0.0; PORT is injected by the platform
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`LoyalGenie API running on http://0.0.0.0:${PORT}`)
     console.log(`Database: Supabase Postgres`)
     console.log(`PIN scheduler: active (server-side rotation for Realtime)`)
     console.log(`Lottery draw scheduler: active`)

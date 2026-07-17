@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid'
 import { db } from '../db/client.js'
 import { todayInCampaignTz, isCampaignInWindow } from '../utils/campaign-dates.js'
 import { verifyPlaySession } from './campaigns.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 import {
   formatGroupUnlockDescription,
   formatGroupUnlockRewardLabel,
@@ -206,6 +207,8 @@ export async function claimGroupUnlockReward(
     })
     redeemBefore = (unlockedRow.rows[0]?.redeem_expires_at as string) ?? null
   }
+
+  invalidateBusinessAnalyticsCaches(businessId)
 
   return {
     rewardId,

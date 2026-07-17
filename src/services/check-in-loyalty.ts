@@ -10,6 +10,7 @@ import {
   checkInLoyaltyConfigSchema,
   type CheckInLoyaltyConfig,
 } from './check-in-loyalty-schema.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 
 export interface LoyaltyCardRow {
   id: string
@@ -466,6 +467,7 @@ export async function executeCheckIn(
   }
 
   await upsertBusinessPoints(campaign.businessId, customerId, pointsEarned)
+  invalidateBusinessAnalyticsCaches(campaign.businessId)
 
   return {
     enrolled: isNew,

@@ -3,6 +3,7 @@ import { db } from '../db/client.js'
 import { todayInCampaignTz } from '../utils/campaign-dates.js'
 import { computeRedeemExpiryDate } from '../utils/redeem-expiry.js'
 import { verifyPlaySession } from './campaigns.js'
+import { invalidateBusinessAnalyticsCaches } from './vendor-analytics.js'
 import {
   formatBuyXGetYDescription,
   formatBuyXGetYRewardLabel,
@@ -182,6 +183,8 @@ export async function claimBuyXGetYReward(
       args: [nanoid(), campaignId, customerId, today],
     },
   ])
+
+  invalidateBusinessAnalyticsCaches(businessId)
 
   return {
     rewardId,
